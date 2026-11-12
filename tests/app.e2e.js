@@ -267,7 +267,8 @@ function localDay(d) {
   // ---- Recent and saved foods come first, without duplicates.
   await page.click('#open-add');
   await page.waitForFunction(() => document.querySelector('#results-heading').textContent === 'Recent');
-  assert.match(await page.textContent('#results'), /Bananas, raw.*Saved/s);
+  assert.match(await page.textContent('#results'), /Bananas, raw/);
+  assert.doesNotMatch(await page.textContent('#results'), /Saved/, 'no Saved tag in Recent');
   await page.fill('#food-q', 'banana');
   await page.waitForFunction(() => !document.querySelector('#results-note').textContent.includes('Searching'), null, { timeout: 30000 });
   await page.waitForFunction(() => document.querySelectorAll('#results [data-result]').length > 3);
@@ -486,6 +487,83 @@ function localDay(d) {
   assert.equal(recipe.servings[0].grams, Math.round((total / 3) * 10) / 10);
   await page.click('#add-close');
   console.log('ok  recipes: build from search and AI paste, adjust, save, log a serving, edit servings');
+
+  // ---- Add sheet: opens without focusing the text box; Recent shows 5, then the rest.
+  await page.click('#open-add');
+  await page.waitForFunction(() => document.querySelector('#results-heading').textContent === 'Recent');
+  assert.equal(await page.evaluate(() => document.activeElement.matches('#add > [autofocus]')), true, 'no field focused, so no keyboard');
+  assert.ok(foods.length > 5);
+  assert.equal(await page.$$eval('#results [data-result]', (r) => r.length), 5);
+  assert.equal(await page.textContent('#results-more'), `Show ${foods.length - 5} more`);
+  await page.click('#results-more');
+  await page.waitForFunction((n) => document.querySelectorAll('#results [data-result]').length === n, foods.length);
+  assert.ok(await page.isHidden('#results-more'));
+  await page.screenshot({ path: `${OUT}/step5-add.png` });
+  await page.click('#add-close');
+  console.log('ok  add sheet: no keyboard on open, Recent 5 then show more');
+
+  // ---- Make a recipe from a meal already logged, replacing its items with 1 serving.
+  const mealKey = await page.getAttribute('[data-recipe-meal]', 'data-recipe-meal');
+  const mealEntries = entries.filter((e) => e.person_id === JON && e.eaten_on === localDay(new Date()) && e.meal === mealKey);
+  assert.ok(mealEntries.length >= 3, 'a meal with several items');
+  await page.click(`[data-recipe-meal="${mealKey}"]`);
+  await page.waitForSelector('#recipe[open]');
+  assert.equal(await page.$$eval('#recipe-items .citem', (r) => r.length), mealEntries.length);
+  assert.ok(await page.isVisible('#recipe-from-hint'));
+  assert.ok(await page.isChecked('#recipe-log'));
+  assert.match(await page.textContent('#recipe-log-text'), /Replace these items in jon's/);
+  // Leave the first item out of the recipe: it stays in the log as it is.
+  const kept = mealEntries[0];
+  await page.click('[data-rremove="0"]');
+  await page.fill('#recipe-form [name=name]', 'Egg bake');
+  const expectCal = mealEntries.slice(1).reduce((c, e) => c + Number(e.calories), 0);
+  assert.match(await page.textContent('#recipe-totals'), new RegExp(`^\\s*${Math.round(expectCal)}\\s`));
+  await page.screenshot({ path: `${OUT}/step5-recipe-from-meal.png` });
+  await page.click('#recipe-form button[type=submit]');
+  await page.waitForSelector('#recipe:not([open])', { state: 'attached' });
+  await page.waitForFunction(() => document.querySelector('#meals').textContent.includes('Egg bake'));
+  const bake = foods.find((f) => f.name === 'Egg bake');
+  const mealNow = entries.filter((e) => e.person_id === JON && e.eaten_on === localDay(new Date()) && e.meal === mealKey);
+  assert.deepEqual(mealNow.map((e) => e.description).sort(), [kept.description, 'Egg bake'].sort(), 'replaced by 1 serving');
+  const bakeEntry = mealNow.find((e) => e.description === 'Egg bake');
+  assert.equal(bakeEntry.food_id, bake.id);
+  assert.equal(Math.round(bakeEntry.calories), Math.round(expectCal));
+  assert.equal(bake.ingredients.length, mealEntries.length - 1);
+  console.log('ok  make a recipe from a logged meal; it replaces those items with 1 serving');
+
+  // ---- From the AI's proposal: save as a recipe instead of separate items (one has no weight).
+  aiScript = [
+    () => [use('k1', 'search_foods', { query: 'milk whole' })],
+    (r) => {
+      const milk = JSON.parse(r.messages.at(-1).content[0].content)[0];
+      return [use('k2', 'log_foods', { items: [
+        { person: 'jon', ref: milk.ref, name: 'Milk', amount: 1, unit: milk.servings[0] || 'g', estimate: zero },
+        { person: 'jon', ref: 'estimate', name: 'Espresso shot', amount: 2, unit: 'shot', estimate: { calories: 6, protein: 0, carbs: 1, fat: 0, fiber: 0 } },
+      ] })];
+    },
+  ];
+  const beforeEntries = entries.length;
+  await page.click('#open-add');
+  await page.fill('#ai-text', 'my latte');
+  await page.click('#ai-send');
+  await page.waitForSelector('#confirm[open]', { timeout: 30000 });
+  assert.ok(await page.isVisible('#confirm-recipe'));
+  await page.click('#confirm-recipe');
+  await page.waitForSelector('#recipe[open]');
+  assert.ok(await page.isDisabled('#recipe-log'));
+  assert.match(await page.textContent('#recipe-log-text'), /Log 1 serving for jon/);
+  await page.fill('#recipe-form [name=name]', 'My latte');
+  await page.click('#recipe-form button[type=submit]');
+  await page.waitForFunction(() => document.querySelector('#meals').textContent.includes('My latte'));
+  assert.equal(entries.length, beforeEntries + 1, 'one recipe entry instead of two items');
+  const latte = foods.find((f) => f.name === 'My latte');
+  assert.deepEqual(latte.servings.map((x) => x.label), ['1 serving', 'whole recipe'], 'no weight for an estimate');
+  assert.equal(entries.at(-1).description, 'My latte');
+  assert.equal(entries.at(-1).unit, '1 serving');
+  // Logging it again later by the serving gives the same numbers.
+  const latteCal = entries.at(-1).calories;
+  assert.equal(Math.round((latte.calories * latte.servings[0].grams) / 100), Math.round(latteCal));
+  console.log('ok  AI proposal saved as a recipe, logged as 1 serving');
 
   // ---- Weight: weigh-ins, trend, chart tooltip, delete.
   const today = localDay(new Date());
