@@ -98,9 +98,9 @@ All are queried at once, and results are cached in our database.
 | Source | Key | Good for |
 |---|---|---|
 | Our saved foods | n/a | Anything we have confirmed before. Always checked first |
-| Open Food Facts | none | Barcode lookup, packaged foods |
-| USDA FoodData Central | free key | Lab-measured whole foods, manufacturers' own label data, generic dishes |
-| FatSecret Platform (Basic, free) | free key | Brands and chain restaurants (search only; its barcode lookup is a paid feature) |
+| Open Food Facts | none | Barcode lookup (its name search is too rate-limited to use) |
+| USDA FoodData Central | free key | Name search and barcodes: lab-measured whole foods, manufacturers' own label data, generic and some restaurant dishes |
+| FatSecret Platform | free key | **Not used for now:** its free plan only accepts requests from fixed IP addresses, which Supabase's servers don't have |
 
 Other free sources (for example Edamam, Spoonacular, CalorieNinjas) are added only if their free
 terms allow this kind of app.

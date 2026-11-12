@@ -13,8 +13,15 @@ const MEALS = [
   { key: 'dinner', label: 'Dinner' },
   { key: 'snack', label: 'Snacks' },
 ];
+const OZ = 28.3495;
 
-const state = { user: null, profiles: [], personId: null, day: localDay(new Date()), entries: [], editing: null };
+const state = {
+  user: null, profiles: [], personId: null, day: localDay(new Date()), entries: [],
+  editing: null,   // the log entry being edited, if any
+  food: null,      // the food open in the amount sheet
+  results: [],     // foods listed in the add sheet
+  reader: null,    // the barcode scanner while the camera is on
+};
 const $ = (id) => document.getElementById(id);
 
 // ---------- helpers ----------
@@ -44,8 +51,9 @@ function mealForNow() {
   return 'snack';
 }
 
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const round = (n) => Math.round(Number(n) || 0);
+const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
 const num = (v) => (v === '' || v == null ? null : Number(v));
 const caloriesFromMacros = (p, c, f) => 4 * (p || 0) + 4 * (c || 0) + 9 * (f || 0);
 const profile = (id) => state.profiles.find((p) => p.id === id);
@@ -79,6 +87,25 @@ function toast(msg) {
 function fail(err) {
   console.error(err);
   toast(err?.message || 'Something went wrong');
+}
+
+// Open one sheet, closing any other.
+function openSheet(id) {
+  for (const d of document.querySelectorAll('dialog[open]')) if (d.id !== id) d.close();
+  if (!$(id).open) $(id).showModal();
+}
+
+// "Who ate this?" buttons: each person, plus Both.
+function renderWho(el, selected) {
+  const options = [...state.profiles.map((p) => ({ id: p.id, name: p.name || 'Unnamed' })), { id: 'both', name: 'Both' }];
+  el.innerHTML = options
+    .map((o) => `<button type="button" data-who="${o.id}" aria-pressed="${o.id === selected}">${esc(o.name)}</button>`)
+    .join('');
+}
+
+function chosenPeople(el) {
+  const who = el.querySelector('[aria-pressed="true"]').dataset.who;
+  return who === 'both' ? state.profiles.map((p) => p.id) : [who];
 }
 
 // ---------- screens ----------
@@ -142,37 +169,327 @@ function bar(n, eaten, target) {
     </div>`;
 }
 
+// "2 × 1 medium" for the day's log: serving names without their (sizes in parentheses).
+function amountText(e) {
+  if (!e.unit) return '';
+  if (e.unit === 'g' || e.unit === 'oz') return `${round1(e.amount)} ${e.unit} · `;
+  const unit = e.unit.replace(/\s*\([^)]*\)/g, '');
+  return `${Number(e.amount) === 1 ? '' : `${round1(e.amount)} × `}${unit} · `;
+}
+
 function entryRow(e) {
   return `
     <button class="entry" data-entry="${e.id}">
-      <span class="desc">${esc(e.description)}${e.is_estimate ? ' <span class="badge">Estimate</span>' : ''}
-        <span class="macros">P ${round(e.protein)} · C ${round(e.carbs)} · F ${round(e.fat)} · Fiber ${round(e.fiber)}</span></span>
+      <span class="desc">${esc(e.description)}${e.is_estimate ? ' <span class="badge warn">Estimate</span>' : ''}
+        <span class="macros">${esc(amountText(e))}P ${round(e.protein)} · C ${round(e.carbs)} · F ${round(e.fat)} · Fiber ${round(e.fiber)}</span></span>
       <span class="kcal">${round(e.calories)}</span>
     </button>`;
 }
 
-// ---------- add / edit ----------
+// ---------- foods ----------
 
-function openEntry(entry) {
+// A saved row from the foods table, in the same shape the food function returns.
+function fromSaved(row) {
+  return {
+    id: row.id, source: row.source, source_id: row.source_id, name: row.name, brand: row.brand, barcode: row.barcode,
+    per100: Object.fromEntries(NUTRIENTS.map((n) => [n.key, Number(row[n.key]) || 0])),
+    servings: row.servings || [], is_estimate: row.is_estimate, saved: true, checks: {},
+  };
+}
+
+function toRow(f) {
+  return {
+    ...(f.id ? { id: f.id } : {}),
+    name: f.name, brand: f.brand || null, barcode: f.barcode || null, source: f.source, source_id: f.source_id || null,
+    ...f.per100, servings: f.servings, is_estimate: Boolean(f.is_estimate),
+  };
+}
+
+const unitsFor = (f) => [...f.servings, { label: 'g', grams: 1 }, { label: 'oz', grams: OZ }];
+const nutrientsFor = (f, grams) => Object.fromEntries(NUTRIENTS.map((n) => [n.key, (f.per100[n.key] * grams) / 100]));
+
+function foodTitle(f) {
+  return f.brand && !f.name.toLowerCase().includes(f.brand.toLowerCase()) ? `${f.name} (${f.brand})` : f.name;
+}
+
+function badges(f) {
+  const out = [];
+  if (f.saved) out.push('<span class="badge">Saved</span>');
+  else out.push(`<span class="badge">${f.source === 'off' ? 'Open Food Facts' : 'USDA'}</span>`);
+  if (f.checks.sources_agree === true) out.push('<span class="badge good">✓ 2 sources agree</span>');
+  if (f.checks.sources_agree === false) out.push('<span class="badge warn">Sources differ</span>');
+  if (f.checks.calories_match === false) out.push('<span class="badge warn">Calories don\'t add up</span>');
+  if (f.is_estimate) out.push('<span class="badge warn">Estimate</span>');
+  return out.join(' ');
+}
+
+function resultRow(f, i) {
+  const s = f.servings[0];
+  const cals = s ? round((f.per100.calories * s.grams) / 100) : round(f.per100.calories);
+  return `
+    <button class="entry" data-result="${i}">
+      <span class="desc">${esc(f.name)}
+        <span class="macros">${f.brand ? `${esc(f.brand)} · ` : ''}${esc(s ? s.label : '100 g')}</span>
+        <span>${badges(f)}</span></span>
+      <span class="kcal">${cals}</span>
+    </button>`;
+}
+
+function renderResults(heading, note = '') {
+  $('results-heading').textContent = heading;
+  $('results-heading').hidden = !heading;
+  $('results-note').textContent = note;
+  $('results').innerHTML = state.results.map(resultRow).join('');
+}
+
+// ---------- add sheet: recent foods, search, barcode ----------
+
+async function openAdd() {
+  state.editing = null;
+  $('food-q').value = '';
+  openSheet('add');
+  await showRecent();
+}
+
+async function showRecent() {
+  state.results = (await db.recentFoods()).map(fromSaved);
+  renderResults(state.results.length ? 'Recent' : '', state.results.length ? '' : 'Search for a food or scan a barcode.');
+}
+
+let searchToken = 0;
+let searchTimer;
+
+async function runSearch(text) {
+  const token = ++searchToken;
+  text = text.trim();
+  if (text.length < 2) return showRecent();
+  const saved = (await db.searchSavedFoods(text)).map(fromSaved);
+  if (token !== searchToken) return;
+  state.results = saved;
+  renderResults('Results', 'Searching USDA…');
+  try {
+    const { results } = await db.lookup({ action: 'search', query: text });
+    if (token !== searchToken) return;
+    const isSaved = (r) => saved.some((s) => s.source === r.source && s.source_id === r.source_id);
+    state.results = [...saved, ...results.filter((r) => !isSaved(r))];
+    renderResults('Results', state.results.length ? '' : 'No matches. Try other words, scan the barcode, or use Quick add.');
+  } catch (err) {
+    if (token === searchToken) renderResults('Results', err.message);
+  }
+}
+
+async function lookupBarcode(code) {
+  code = code.replace(/\D/g, '');
+  if (code.length < 8) return toast('That doesn\'t look like a full barcode');
+  openSheet('add');
+  $('food-q').value = '';
+  state.results = [];
+  renderResults('', `Looking up ${code}…`);
+  try {
+    const saved = await db.savedFoodByBarcode(code);
+    if (saved) return openFood(fromSaved(saved));
+    const { results } = await db.lookup({ action: 'barcode', code });
+    if (results.length === 1) return openFood(results[0]);
+    state.results = results;
+    renderResults(
+      results.length ? `Barcode ${code}` : '',
+      results.length
+        ? 'The two sources list different numbers for this product. Compare with the label and pick the one that matches.'
+        : `Barcode ${code} isn't in USDA or Open Food Facts. Search by name, or use Quick add with the numbers from the label.`,
+    );
+  } catch (err) {
+    renderResults('', err.message);
+  }
+}
+
+// ---------- scanner ----------
+
+async function loadScanner() {
+  if (window.ZXing) return;
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'vendor/zxing-library-0.21.3.min.js';
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Could not load the scanner'));
+    document.head.append(s);
+  });
+}
+
+function newReader() {
+  const { BarcodeFormat: F, DecodeHintType, BrowserMultiFormatReader } = window.ZXing;
+  const hints = new Map([[DecodeHintType.POSSIBLE_FORMATS, [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E]]]);
+  return new BrowserMultiFormatReader(hints);
+}
+
+async function openScanner() {
+  openSheet('scanner');
+  $('scan-code').value = '';
+  $('scan-status').textContent = 'Starting the camera…';
+  try {
+    await loadScanner();
+    stopScanner();
+    const reader = newReader();
+    state.reader = reader;
+    await reader.decodeFromConstraints({ video: { facingMode: 'environment' } }, $('scan-video'), (result) => {
+      if (result && state.reader === reader) scanned(result.getText());
+    });
+    $('scan-status').textContent = 'Point the camera at the barcode.';
+  } catch (err) {
+    console.error(err);
+    $('scan-status').textContent = 'The camera isn\'t available. Take a photo of the barcode or type its number instead.';
+  }
+}
+
+function stopScanner() {
+  state.reader?.reset();
+  state.reader = null;
+}
+
+function scanned(code) {
+  stopScanner();
+  lookupBarcode(code);
+}
+
+async function scanPhoto(file) {
+  $('scan-status').textContent = 'Reading the photo…';
+  const url = URL.createObjectURL(file);
+  try {
+    await loadScanner();
+    stopScanner();
+    const result = await newReader().decodeFromImageUrl(url);
+    scanned(result.getText());
+  } catch {
+    $('scan-status').textContent = 'Couldn\'t find a barcode in that photo. Try again closer up, or type the number.';
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+// ---------- amount sheet ----------
+
+async function openFood(food, entry = null) {
+  state.food = food;
+  state.editing = entry;
+  const f = $('food-form');
+  $('food-name').textContent = foodTitle(food);
+  $('food-badges').innerHTML = badges(food);
+  $('food-delete').hidden = !entry;
+  $('food-back').textContent = entry ? 'Cancel' : 'Back';
+  $('food-who-field').hidden = Boolean(entry);
+  if (!entry) renderWho($('food-who'), state.personId);
+  f.meal.value = entry ? entry.meal : mealForNow();
+  fillUnits(entry);
+  updateFoodPreview();
+  openSheet('food');
+
+  // USDA search results leave out household portions (1 cup, 1 medium...); fetch them.
+  if (food.source === 'usda' && !food.saved && !(food.kind === 'label' && food.servings.length)) {
+    try {
+      const { result } = await db.lookup({ action: 'details', id: food.source_id });
+      if (state.food !== food || !result.servings.length) return;
+      const hadServing = food.servings.length > 0;
+      food.servings = result.servings;
+      if (!hadServing) fillUnits(null);
+      else fillUnits({ amount: f.amount.value, unit: unitsFor(food)[f.unit.value]?.label });
+      updateFoodPreview();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+}
+
+// The unit list: the food's servings, then g and oz. Keeps the chosen amount and unit when possible.
+function fillUnits(chosen) {
+  const f = $('food-form');
+  const units = unitsFor(state.food);
+  f.unit.innerHTML = units.map((u, i) => `<option value="${i}">${esc(u.label)}</option>`).join('');
+  let i = chosen ? units.findIndex((u) => u.label === chosen.unit) : -1;
+  if (i >= 0) {
+    f.amount.value = round1(chosen.amount);
+  } else if (chosen?.grams) {
+    i = units.length - 2;
+    f.amount.value = round1(chosen.grams);
+  } else if (state.food.servings.length) {
+    i = 0;
+    f.amount.value = 1;
+  } else {
+    i = units.length - 2;
+    f.amount.value = 100;
+  }
+  f.unit.value = i;
+}
+
+function foodAmount() {
+  const f = $('food-form');
+  const unit = unitsFor(state.food)[f.unit.value];
+  const amount = Number(f.amount.value) || 0;
+  return { amount, unit, grams: amount * unit.grams };
+}
+
+function updateFoodPreview() {
+  const { grams } = foodAmount();
+  const n = nutrientsFor(state.food, grams);
+  $('food-macros').innerHTML = `
+    <span class="big">${round(n.calories)}</span> <span class="muted">cal · ${round(grams)} g</span>
+    <div class="macros">P ${round(n.protein)} · C ${round(n.carbs)} · F ${round(n.fat)} · Fiber ${round(n.fiber)}</div>`;
+
+  const people = state.editing ? [state.editing.person_id] : chosenPeople($('food-who'));
+  $('food-after').textContent = 'After this: ' + people.map((id) => {
+    const p = profile(id);
+    const t = totals(id);
+    const already = state.editing ? Number(state.editing.calories) : 0;
+    const alreadyP = state.editing ? Number(state.editing.protein) : 0;
+    const cal = round(p.target_calories - (t.calories - already + n.calories));
+    const pro = round(p.target_protein - (t.protein - alreadyP + n.protein));
+    return `${p.name} ${cal < 0 ? `${-cal} cal over` : `${cal} cal left`}, ${pro < 0 ? `${-pro}g protein over` : `${pro}g protein left`}`;
+  }).join(' · ');
+}
+
+async function saveFoodEntry() {
+  const f = $('food-form');
+  const { amount, unit, grams } = foodAmount();
+  if (!(grams > 0)) return toast('Enter an amount');
+  const row = await db.saveFood(toRow(state.food));
+  const n = nutrientsFor(state.food, grams);
+  const values = {
+    description: foodTitle(state.food), meal: f.meal.value, food_id: row.id,
+    amount: round1(amount), unit: unit.label, grams: round1(grams), is_estimate: Boolean(state.food.is_estimate),
+  };
+  for (const k in n) values[k] = round1(n[k]);
+
+  let people;
+  if (state.editing) {
+    await db.updateEntry(state.editing.id, values);
+    people = [state.editing.person_id];
+  } else {
+    people = chosenPeople($('food-who'));
+    await db.addEntries(people.map((id) => ({ ...values, person_id: id, eaten_on: state.day })));
+  }
+  $('food').close();
+  await loadDay();
+  toast(people.map(leftText).join(' · '));
+}
+
+// ---------- quick add / edit by numbers ----------
+
+function openEntry(entry, description = '') {
   state.editing = entry || null;
   const f = $('entry-form');
   f.reset();
-  $('entry-title').textContent = entry ? 'Edit' : 'Add food';
+  $('entry-title').textContent = entry ? 'Edit' : 'Quick add';
   $('entry-delete').hidden = !entry;
   $('who-field').hidden = Boolean(entry);
   if (entry) {
     f.description.value = entry.description;
-    for (const n of NUTRIENTS) f[n.key].value = round(entry[n.key]) || '';
+    for (const n of NUTRIENTS) f[n.key].value = round1(entry[n.key]) || '';
     f.meal.value = entry.meal;
   } else {
+    f.description.value = description;
     f.meal.value = mealForNow();
-    const options = [...state.profiles.map((p) => ({ id: p.id, name: p.name || 'Unnamed' })), { id: 'both', name: 'Both' }];
-    $('who').innerHTML = options
-      .map((o) => `<button type="button" data-who="${o.id}" aria-pressed="${o.id === state.personId}">${esc(o.name)}</button>`)
-      .join('');
+    renderWho($('who'), state.personId);
   }
   updateCalcHint();
-  $('entry').showModal();
+  openSheet('entry');
 }
 
 function updateCalcHint() {
@@ -192,13 +509,31 @@ async function saveEntry() {
     await db.updateEntry(state.editing.id, values);
     people = [state.editing.person_id];
   } else {
-    const who = $('who').querySelector('[aria-pressed="true"]').dataset.who;
-    people = who === 'both' ? state.profiles.map((p) => p.id) : [who];
+    people = chosenPeople($('who'));
     await db.addEntries(people.map((id) => ({ ...values, person_id: id, eaten_on: state.day })));
   }
   $('entry').close();
   await loadDay();
   toast(people.map(leftText).join(' · '));
+}
+
+async function deleteEditing(sheet) {
+  if (!confirm(`Delete "${state.editing.description}"?`)) return;
+  try {
+    await db.deleteEntry(state.editing.id);
+    $(sheet).close();
+    await loadDay();
+    toast('Deleted');
+  } catch (err) { fail(err); }
+}
+
+async function editEntry(entry) {
+  if (!entry.food_id) return openEntry(entry);
+  try {
+    await openFood(fromSaved(await db.getFood(entry.food_id)), entry);
+  } catch {
+    openEntry(entry); // the food was deleted: edit the numbers instead
+  }
 }
 
 // ---------- settings ----------
@@ -213,7 +548,7 @@ function openSettings() {
       </div>
     </fieldset>`).join('');
   $('signed-in-as').textContent = state.user.email;
-  $('settings').showModal();
+  openSheet('settings');
 }
 
 async function saveSettings() {
@@ -254,30 +589,61 @@ $('prev-day').addEventListener('click', () => { state.day = shiftDay(state.day, 
 $('next-day').addEventListener('click', () => { state.day = shiftDay(state.day, 1); loadDay().catch(fail); });
 $('go-today').addEventListener('click', () => { state.day = localDay(new Date()); loadDay().catch(fail); });
 
-$('open-add').addEventListener('click', () => openEntry(null));
 $('meals').addEventListener('click', (ev) => {
   const b = ev.target.closest('[data-entry]');
-  if (b) openEntry(state.entries.find((e) => e.id === b.dataset.entry));
+  if (b) editEntry(state.entries.find((e) => e.id === b.dataset.entry));
 });
 
-$('who').addEventListener('click', (ev) => {
+// Who-ate-this buttons behave like radio buttons.
+document.addEventListener('click', (ev) => {
   const b = ev.target.closest('[data-who]');
   if (!b) return;
-  for (const x of $('who').children) x.setAttribute('aria-pressed', x === b);
+  for (const x of b.parentElement.children) x.setAttribute('aria-pressed', x === b);
+  if ($('food').open) updateFoodPreview();
 });
 
+// Add sheet
+$('open-add').addEventListener('click', () => openAdd().catch(fail));
+$('food-q').addEventListener('input', (ev) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runSearch(ev.target.value).catch(fail), 400);
+});
+$('search-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  clearTimeout(searchTimer);
+  runSearch($('food-q').value).catch(fail);
+});
+$('results').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-result]');
+  if (b) openFood(state.results[b.dataset.result]).catch(fail);
+});
+$('open-scanner').addEventListener('click', () => openScanner());
+$('open-quick').addEventListener('click', () => openEntry(null, $('food-q').value.trim()));
+
+// Scanner
+$('scanner').addEventListener('close', stopScanner);
+$('scan-photo').addEventListener('change', (ev) => {
+  if (ev.target.files[0]) scanPhoto(ev.target.files[0]);
+  ev.target.value = '';
+});
+$('scan-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  stopScanner();
+  lookupBarcode($('scan-code').value);
+});
+
+// Amount sheet
+$('food-form').addEventListener('input', updateFoodPreview);
+$('food-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveFoodEntry().catch(fail); });
+$('food-back').addEventListener('click', () => (state.editing ? $('food').close() : openSheet('add')));
+$('food-delete').addEventListener('click', () => deleteEditing('food'));
+
+// Quick add / edit sheet
 $('entry-form').addEventListener('input', updateCalcHint);
 $('entry-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveEntry().catch(fail); });
-$('entry-delete').addEventListener('click', async () => {
-  if (!confirm(`Delete "${state.editing.description}"?`)) return;
-  try {
-    await db.deleteEntry(state.editing.id);
-    $('entry').close();
-    await loadDay();
-    toast('Deleted');
-  } catch (err) { fail(err); }
-});
+$('entry-delete').addEventListener('click', () => deleteEditing('entry'));
 
+// Settings
 $('open-settings').addEventListener('click', openSettings);
 $('settings-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveSettings().catch(fail); });
 $('sign-out').addEventListener('click', async () => {

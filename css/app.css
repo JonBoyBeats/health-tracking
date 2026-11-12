@@ -81,12 +81,28 @@ legend { font-size: 13px; color: var(--muted); padding: 0 4px; }
 .desc { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
 .macros { color: var(--muted); font-size: 12.5px; }
 .kcal { font-weight: 600; white-space: nowrap; }
-.badge { font-size: 11px; color: var(--carbs); border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; }
 
 .fab {
   position: fixed; right: 16px; bottom: calc(20px + env(safe-area-inset-bottom));
   border-radius: 999px; padding: 14px 22px; font-size: 16px; box-shadow: 0 6px 20px rgba(0, 0, 0, .5);
 }
+
+/* Add sheet, scanner, amount sheet */
+.row { display: flex; gap: 8px; align-items: flex-end; }
+.row input, .row .grow { flex: 1; min-width: 0; }
+.amount { width: 96px; flex: none; }
+.list-heading { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin: 4px 0 0; }
+#results { display: flex; flex-direction: column; }
+#results-note:empty { display: none; }
+.badge { display: inline-block; font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--line-strong);
+         border-radius: 4px; padding: 0 5px; margin-top: 3px; }
+.badge.good { color: var(--accent); border-color: currentColor; }
+.badge.warn { color: var(--carbs); border-color: currentColor; }
+#food-badges { margin-top: 4px; }
+#scan-video { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #000; border-radius: 10px; }
+.filebutton { position: relative; align-items: center; color: var(--ink); font-weight: 600; font-size: 15px; cursor: pointer;
+              background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: 8px; padding: 9px 14px; }
+.filebutton input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 
 /* Sheets */
 dialog {

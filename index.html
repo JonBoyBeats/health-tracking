@@ -46,9 +46,75 @@
   <button id="open-add" class="fab primary">+ Add</button>
 </main>
 
+<dialog id="add">
+  <div class="stack">
+    <form id="search-form" class="row" role="search">
+      <input id="food-q" type="search" placeholder="Search foods" autocomplete="off" enterkeyhint="search" aria-label="Search foods">
+      <button id="open-scanner" type="button">Scan</button>
+    </form>
+    <h3 id="results-heading" class="list-heading" hidden></h3>
+    <p id="results-note" class="hint"></p>
+    <div id="results"></div>
+    <div class="actions">
+      <button id="open-quick" type="button" class="link">Quick add: type in the numbers</button>
+      <span class="spacer"></span>
+      <button type="button" data-close>Close</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="scanner">
+  <div class="stack">
+    <h2>Scan a barcode</h2>
+    <video id="scan-video" playsinline muted autoplay></video>
+    <p id="scan-status" class="hint"></p>
+    <label class="filebutton">Take a photo instead
+      <input id="scan-photo" type="file" accept="image/*" capture="environment">
+    </label>
+    <form id="scan-form" class="row">
+      <input id="scan-code" inputmode="numeric" placeholder="Or type the barcode number" aria-label="Barcode number" autocomplete="off">
+      <button type="submit">Look up</button>
+    </form>
+    <div class="actions"><span class="spacer"></span><button type="button" data-close>Cancel</button></div>
+  </div>
+</dialog>
+
+<dialog id="food">
+  <form id="food-form" class="stack">
+    <div>
+      <h2 id="food-name"></h2>
+      <div id="food-badges"></div>
+    </div>
+    <div class="row">
+      <label class="amount">Amount <input name="amount" inputmode="decimal" required></label>
+      <label class="grow">Unit <select name="unit"></select></label>
+    </div>
+    <div id="food-macros" class="card"></div>
+    <fieldset id="food-who-field">
+      <legend>Who ate this?</legend>
+      <div id="food-who" class="seg"></div>
+    </fieldset>
+    <label>Meal
+      <select name="meal">
+        <option value="breakfast">Breakfast</option>
+        <option value="lunch">Lunch</option>
+        <option value="dinner">Dinner</option>
+        <option value="snack">Snacks</option>
+      </select>
+    </label>
+    <p id="food-after" class="hint"></p>
+    <div class="actions">
+      <button id="food-delete" type="button" class="danger" hidden>Delete</button>
+      <span class="spacer"></span>
+      <button id="food-back" type="button">Back</button>
+      <button class="primary" type="submit">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="entry">
   <form id="entry-form" class="stack" method="dialog">
-    <h2 id="entry-title">Add food</h2>
+    <h2 id="entry-title">Quick add</h2>
     <label>What did you eat? <input name="description" required autocomplete="off" placeholder="e.g. Turkey sandwich"></label>
     <div class="grid5">
       <label>Calories <input name="calories" inputmode="decimal"></label>
