@@ -92,3 +92,21 @@ export const lookup = (body) => callFunction('food', body, 'Food lookup is not a
 
 // The "assist" Edge Function: { action: 'chat', text, messages, context } | { action: 'label', image, barcode }
 export const assist = (body) => callFunction('assist', body, 'The AI is not available right now');
+
+export async function deleteFood(id) {
+  check(await client.from('foods').delete().eq('id', id));
+}
+
+// ---------- weight ----------
+
+export async function listWeights(personId) {
+  return check(await client.from('weights').select('measured_on, pounds').eq('person_id', personId).order('measured_on'));
+}
+
+export async function saveWeight(personId, day, pounds) {
+  check(await client.from('weights').upsert({ person_id: personId, measured_on: day, pounds }, { onConflict: 'person_id,measured_on' }));
+}
+
+export async function deleteWeight(personId, day) {
+  check(await client.from('weights').delete().eq('person_id', personId).eq('measured_on', day));
+}

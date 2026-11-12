@@ -24,6 +24,10 @@ const state = {
   lastBarcode: null, // a barcode no source had, attached to a label photo taken next
   ai: [],          // the AI conversation so far (sent back with each answer)
   proposal: [],    // items the AI proposed, shown in the confirm sheet
+  recipe: null,    // the recipe being built or edited
+  recipeMode: false, // the add and amount sheets are picking a recipe ingredient
+  weights: [],     // the shown person's weigh-ins, oldest first
+  chart: null,     // the weight chart's points and scales, for the tooltip
 };
 const $ = (id) => document.getElementById(id);
 
@@ -32,6 +36,9 @@ const $ = (id) => document.getElementById(id);
 function localDay(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
+
+const dateOf = (day) => { const [y, m, d] = day.split('-').map(Number); return new Date(y, m - 1, d); };
+const shortDate = (day) => dateOf(day).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
 function shiftDay(day, n) {
   const [y, m, d] = day.split('-').map(Number);
@@ -197,6 +204,7 @@ function fromSaved(row) {
     id: row.id, source: row.source, source_id: row.source_id, name: row.name, brand: row.brand, barcode: row.barcode,
     per100: Object.fromEntries(NUTRIENTS.map((n) => [n.key, Number(row[n.key]) || 0])),
     servings: row.servings || [], is_estimate: row.is_estimate, saved: true, checks: {},
+    ingredients: row.ingredients || null,
   };
 }
 
@@ -205,6 +213,7 @@ function toRow(f) {
     ...(f.id ? { id: f.id } : {}),
     name: f.name, brand: f.brand || null, barcode: f.barcode || null, source: f.source, source_id: f.source_id || null,
     ...f.per100, servings: f.servings, is_estimate: Boolean(f.is_estimate),
+    ...(f.ingredients ? { ingredients: f.ingredients } : {}),
   };
 }
 
@@ -217,7 +226,8 @@ function foodTitle(f) {
 
 function badges(f) {
   const out = [];
-  if (f.saved) out.push('<span class="badge">Saved</span>');
+  if (f.source === 'recipe') out.push('<span class="badge">Recipe</span>');
+  else if (f.saved) out.push('<span class="badge">Saved</span>');
   else out.push(`<span class="badge">${{ off: 'Open Food Facts', label: 'From label photo' }[f.source] || 'USDA'}</span>`);
   if (f.checks.sources_agree === true) out.push('<span class="badge good">✓ 2 sources agree</span>');
   if (f.checks.sources_agree === false) out.push('<span class="badge warn">Sources differ</span>');
@@ -247,9 +257,12 @@ function renderResults(heading, note = '') {
 
 // ---------- add sheet: recent foods, search, barcode ----------
 
-async function openAdd() {
+async function openAdd(forRecipe = false) {
   state.editing = null;
   state.lastBarcode = null;
+  state.recipeMode = forRecipe;
+  for (const id of ['ai-form', 'add-divider', 'open-quick', 'label-link', 'open-recipe']) $(id).hidden = forRecipe;
+  $('add-title').hidden = !forRecipe;
   $('food-q').value = '';
   openSheet('add');
   await showRecent();
@@ -496,6 +509,259 @@ async function readLabelPhoto(file) {
   }
 }
 
+// ---------- recipes ----------
+// A recipe is saved as a food (source 'recipe') with "1 serving" and "whole recipe" sizes, so
+// search, Recent and AI logging find it like any other food. Its ingredients are kept for editing.
+
+const NKEYS = ['calories', 'protein', 'carbs', 'fat', 'fiber'];
+
+function ingredient(food, amount, unit, grams) {
+  const n = nutrientsFor(food, grams);
+  const it = { food, food_id: food.saved ? food.id : null, name: foodTitle(food), amount: round1(amount), unit, grams: round1(grams) };
+  for (const k of NKEYS) it[k] = round1(n[k]);
+  return it;
+}
+
+// Grams and nutrients for one unit of an ingredient, so changing its amount scales cleanly.
+function perUnit(it) {
+  if (!it.per) {
+    const a = Number(it.amount) || 1;
+    it.per = { grams: it.grams / a };
+    for (const k of NKEYS) it.per[k] = it[k] / a;
+  }
+  return it.per;
+}
+
+function recipeTotals() {
+  const t = { grams: 0, calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
+  for (const it of state.recipe.ingredients) for (const k in t) t[k] += Number(it[k]) || 0;
+  return t;
+}
+
+function newRecipe() {
+  state.recipe = { id: null, name: '', servings: 4, ingredients: [] };
+  showRecipe();
+}
+
+function editRecipe(food) {
+  const ingredients = (food.ingredients || []).map((i) => ({ ...i }));
+  const total = ingredients.reduce((g, i) => g + Number(i.grams), 0);
+  const serving = food.servings[0]?.grams || total;
+  state.recipe = { id: food.id, name: food.name, servings: round1(total / serving) || 1, ingredients };
+  showRecipe();
+}
+
+function showRecipe() {
+  const f = $('recipe-form');
+  state.recipeMode = true;
+  f.name.value = state.recipe.name;
+  f.servings.value = state.recipe.servings;
+  $('recipe-title').textContent = state.recipe.id ? 'Edit recipe' : 'New recipe';
+  $('recipe-delete').hidden = !state.recipe.id;
+  renderRecipe();
+  openSheet('recipe');
+}
+
+function renderRecipe() {
+  $('recipe-items').innerHTML = state.recipe.ingredients.map((it, i) => `
+    <div class="citem">
+      <div class="citem-head">
+        <span class="desc">${esc(it.name)}</span>
+        <button type="button" class="icon" data-rremove="${i}" aria-label="Remove ${esc(it.name)}">×</button>
+      </div>
+      <div class="row">
+        <input class="amount-in" data-ramount="${i}" inputmode="decimal" value="${round1(it.amount)}" aria-label="Amount">
+        <span class="macros grow">× ${esc(it.unit)}</span>
+      </div>
+      <div class="macros" data-ritem="${i}"></div>
+    </div>`).join('') || '<p class="hint">No ingredients yet.</p>';
+  updateRecipeTotals();
+}
+
+function updateRecipeTotals() {
+  state.recipe.ingredients.forEach((it, i) => {
+    const el = document.querySelector(`[data-ritem="${i}"]`);
+    if (el) el.textContent = `${round(it.calories)} cal · P ${round(it.protein)} · C ${round(it.carbs)} · F ${round(it.fat)} · Fiber ${round(it.fiber)}`;
+  });
+  const t = recipeTotals();
+  const servings = Number($('recipe-form').servings.value) || 0;
+  $('recipe-totals').innerHTML = t.grams > 0 && servings > 0 ? `
+    <span class="big">${round(t.calories / servings)}</span> <span class="muted">cal per serving · ${round(t.grams / servings)} g</span>
+    <div class="macros">P ${round(t.protein / servings)} · C ${round(t.carbs / servings)} · F ${round(t.fat / servings)} · Fiber ${round(t.fiber / servings)}</div>
+    <div class="macros">Whole recipe: ${round(t.calories)} cal, ${round(t.grams)} g</div>` : '<span class="muted">Add ingredients and the number of servings.</span>';
+}
+
+async function saveRecipe() {
+  const f = $('recipe-form');
+  const r = state.recipe;
+  r.name = f.name.value.trim();
+  r.servings = Number(f.servings.value);
+  const t = recipeTotals();
+  if (!r.name) return toast('Give the recipe a name');
+  if (!(r.servings > 0)) return toast('Enter the number of servings');
+  if (!(t.grams > 0)) return toast('Add at least one ingredient');
+
+  // Ingredients picked from search or the AI join the saved food list too.
+  for (const it of r.ingredients) {
+    if (!it.food_id && it.food) it.food_id = (await db.saveFood(toRow(it.food))).id;
+  }
+  const ingredients = r.ingredients.map((it) => {
+    const row = { food_id: it.food_id || null, name: it.name, amount: round1(it.amount), unit: it.unit, grams: round1(it.grams) };
+    for (const k of NKEYS) row[k] = round1(it[k]);
+    return row;
+  });
+  const serving = t.grams / r.servings;
+  await db.saveFood(toRow({
+    id: r.id, name: r.name, brand: null, barcode: null, source: 'recipe', source_id: null,
+    per100: Object.fromEntries(NKEYS.map((k) => [k, round1((t[k] * 100) / t.grams)])),
+    servings: [
+      { label: `1 serving (${round(serving)} g)`, grams: round1(serving) },
+      { label: `whole recipe (${round(t.grams)} g)`, grams: round1(t.grams) },
+    ],
+    is_estimate: false, ingredients,
+  }));
+  state.recipe = null;
+  toast('Recipe saved');
+  await openAdd();
+}
+
+async function fillRecipeWithAi() {
+  const text = $('recipe-text').value.trim();
+  if (!text) return;
+  $('recipe-ai').disabled = true;
+  $('recipe-status').textContent = 'Reading the recipe…';
+  try {
+    const res = await db.assist({ action: 'recipe', text });
+    const f = $('recipe-form');
+    if (!f.name.value.trim()) f.name.value = res.name;
+    f.servings.value = res.servings;
+    state.recipe.name = f.name.value;
+    state.recipe.servings = res.servings;
+    state.recipe.ingredients.push(...res.ingredients.map((i) => ingredient(i.food, i.amount, i.unit, i.grams)));
+    $('recipe-text').value = '';
+    $('recipe-paste').open = false;
+    $('recipe-status').textContent = '';
+    renderRecipe();
+    if (res.skipped.length) toast(`Couldn't find: ${res.skipped.join(', ')}. Add them by hand if they matter.`);
+  } catch (err) {
+    $('recipe-status').textContent = err.message;
+  } finally {
+    $('recipe-ai').disabled = false;
+  }
+}
+
+// ---------- weight ----------
+
+// Trend: an exponentially smoothed average (each weigh-in moves it 10% of the way), so day-to-day
+// water swings don't hide the real direction.
+function withTrend(ws) {
+  let t = null;
+  return ws.map((w) => {
+    t = t == null ? w.pounds : t + 0.1 * (w.pounds - t);
+    return { ...w, trend: t };
+  });
+}
+
+async function openWeight() {
+  const p = profile(state.personId);
+  $('weight-person').textContent = p.name;
+  const label = dayLabel(state.day);
+  $('weight-day').textContent = label === 'Today' || label === 'Yesterday' ? label.toLowerCase() : label;
+  state.weights = (await db.listWeights(state.personId)).map((w) => ({ day: w.measured_on, pounds: Number(w.pounds) }));
+  const existing = state.weights.find((w) => w.day === state.day);
+  $('weight-form').pounds.value = existing ? existing.pounds : '';
+  openSheet('weight');
+  renderWeight();
+}
+
+function renderWeight() {
+  const pts = withTrend(state.weights);
+  const last = pts.at(-1);
+  if (!last) {
+    $('weight-hero').innerHTML = '<p class="hint">No weigh-ins yet. Weigh in at the same time each day, like first thing in the morning; the trend line smooths out daily swings.</p>';
+  } else {
+    // Weekly rate: trend now vs. trend about two weeks earlier.
+    const before = [...pts].reverse().find((p) => (dateOf(last.day) - dateOf(p.day)) / 864e5 >= 13);
+    let rate = '';
+    if (before) {
+      const perWeek = ((last.trend - before.trend) / ((dateOf(last.day) - dateOf(before.day)) / 864e5)) * 7;
+      rate = Math.abs(perWeek) < 0.1 ? 'Steady' : `${perWeek < 0 ? 'Losing' : 'Gaining'} ${Math.abs(perWeek).toFixed(1)} lb/week`;
+    }
+    $('weight-hero').innerHTML = `
+      <span class="big">${last.trend.toFixed(1)}</span> <span class="muted">lb trend</span>
+      <div class="macros">${rate ? `${rate} · ` : ''}Last weigh-in ${last.pounds.toFixed(1)} lb, ${shortDate(last.day)}</div>`;
+  }
+  $('weight-chart').innerHTML = weightChart(pts, state.day);
+  $('weight-list').innerHTML = [...pts].reverse().slice(0, 14).map((p) => `
+    <div class="wrow">
+      <span>${esc(shortDate(p.day))}</span>
+      <span><b>${p.pounds.toFixed(1)}</b> lb</span>
+      <span class="muted">trend ${p.trend.toFixed(1)}</span>
+      <button type="button" class="icon" data-wdelete="${p.day}" aria-label="Delete ${esc(shortDate(p.day))}">×</button>
+    </div>`).join('');
+}
+
+// Last 30 days: weigh-ins as dots, the trend as a line. Tap or hover for values.
+function weightChart(pts, endDay) {
+  const start = shiftDay(endDay, -29);
+  const shown = pts.filter((p) => p.day >= start && p.day <= endDay);
+  state.chart = null;
+  if (!shown.length) return pts.length ? '<p class="hint">No weigh-ins in the 30 days up to this date.</p>' : '';
+  const W = Math.max(280, $('weight-chart').clientWidth || 320), H = 190;
+  const pad = { l: 34, r: 10, t: 10, b: 24 };
+  const vals = shown.flatMap((p) => [p.pounds, p.trend]);
+  let lo = Math.floor(Math.min(...vals) - 0.5), hi = Math.ceil(Math.max(...vals) + 0.5);
+  if (hi - lo < 4) { const mid = (hi + lo) / 2; lo = Math.floor(mid - 2); hi = Math.ceil(mid + 2); }
+  const x = (day) => pad.l + ((dateOf(day) - dateOf(start)) / 864e5 / 29) * (W - pad.l - pad.r);
+  const y = (v) => pad.t + ((hi - v) / (hi - lo)) * (H - pad.t - pad.b);
+  const ticks = [lo, Math.round((lo + hi) / 2), hi];
+  state.chart = { shown, x, y, H, pad };
+  return `
+    <div class="legend"><span><i class="key-dot"></i>Weigh-ins</span><span><i class="key-line"></i>Trend</span></div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Weight, last 30 days: weigh-ins and trend">
+      ${ticks.map((t) => `<line class="grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(t)}" y2="${y(t)}"/><text class="tick" x="${pad.l - 6}" y="${y(t) + 4}" text-anchor="end">${t}</text>`).join('')}
+      <text class="tick" x="${pad.l}" y="${H - 6}">${esc(shortDate(start))}</text>
+      <text class="tick" x="${W - pad.r}" y="${H - 6}" text-anchor="end">${esc(shortDate(endDay))}</text>
+      <line id="wx" class="crosshair" y1="${pad.t}" y2="${H - pad.b}" visibility="hidden"/>
+      <path class="trend" d="${shown.map((p, i) => `${i ? 'L' : 'M'}${x(p.day).toFixed(1)} ${y(p.trend).toFixed(1)}`).join(' ')}"/>
+      ${shown.map((p) => `<circle class="weigh" cx="${x(p.day).toFixed(1)}" cy="${y(p.pounds).toFixed(1)}" r="4"/>`).join('')}
+    </svg>
+    <div id="wtip" class="tip" hidden></div>`;
+}
+
+function showWeightTip(ev) {
+  const c = state.chart;
+  const svg = $('weight-chart').querySelector('svg');
+  if (!c || !svg) return;
+  const box = svg.getBoundingClientRect();
+  const px = ((ev.clientX - box.left) / box.width) * svg.viewBox.baseVal.width;
+  const p = c.shown.reduce((a, b) => (Math.abs(c.x(b.day) - px) < Math.abs(c.x(a.day) - px) ? b : a));
+  const cx = c.x(p.day);
+  const line = $('wx');
+  line.setAttribute('x1', cx);
+  line.setAttribute('x2', cx);
+  line.setAttribute('visibility', 'visible');
+  const tip = $('wtip');
+  tip.innerHTML = `<b>${esc(shortDate(p.day))}</b> · ${p.pounds.toFixed(1)} lb · trend ${p.trend.toFixed(1)}`;
+  tip.hidden = false;
+  const left = (cx / svg.viewBox.baseVal.width) * box.width;
+  tip.style.left = `${Math.min(Math.max(left - tip.offsetWidth / 2, 0), box.width - tip.offsetWidth)}px`;
+}
+
+function hideWeightTip() {
+  $('wx')?.setAttribute('visibility', 'hidden');
+  if ($('wtip')) $('wtip').hidden = true;
+}
+
+async function saveWeight() {
+  const pounds = Number($('weight-form').pounds.value);
+  if (!(pounds > 50 && pounds < 1000)) return toast('Enter a weight in pounds');
+  await db.saveWeight(state.personId, state.day, round1(pounds));
+  state.weights = (await db.listWeights(state.personId)).map((w) => ({ day: w.measured_on, pounds: Number(w.pounds) }));
+  renderWeight();
+  toast('Weight saved');
+}
+
 // ---------- scanner ----------
 
 async function loadScanner() {
@@ -567,10 +833,15 @@ async function openFood(food, entry = null) {
   const f = $('food-form');
   $('food-name').textContent = foodTitle(food);
   $('food-badges').innerHTML = badges(food);
+  const forRecipe = state.recipeMode && !entry;
   $('food-delete').hidden = !entry;
   $('food-back').textContent = entry ? 'Cancel' : 'Back';
-  $('food-who-field').hidden = Boolean(entry);
-  if (!entry) renderWho($('food-who'), state.personId);
+  $('food-who-field').hidden = Boolean(entry) || forRecipe;
+  $('food-meal-field').hidden = forRecipe;
+  $('food-after').hidden = forRecipe;
+  $('food-save').textContent = forRecipe ? 'Add to recipe' : 'Save';
+  $('food-edit-recipe').hidden = !(food.source === 'recipe' && food.saved && !forRecipe);
+  if (!entry && !forRecipe) renderWho($('food-who'), state.personId);
   f.meal.value = entry ? entry.meal : mealForNow();
   fillUnits(entry);
   updateFoodPreview();
@@ -626,6 +897,7 @@ function updateFoodPreview() {
   $('food-macros').innerHTML = `
     <span class="big">${round(n.calories)}</span> <span class="muted">cal · ${round(grams)} g</span>
     <div class="macros">P ${round(n.protein)} · C ${round(n.carbs)} · F ${round(n.fat)} · Fiber ${round(n.fiber)}</div>`;
+  if (state.recipeMode && !state.editing) return;
 
   const people = state.editing ? [state.editing.person_id] : chosenPeople($('food-who'));
   $('food-after').textContent = 'After this: ' + people.map((id) => {
@@ -643,6 +915,10 @@ async function saveFoodEntry() {
   const f = $('food-form');
   const { amount, unit, grams } = foodAmount();
   if (!(grams > 0)) return toast('Enter an amount');
+  if (state.recipeMode && !state.editing) {
+    state.recipe.ingredients.push(ingredient(state.food, amount, unit.label, grams));
+    return showRecipe();
+  }
   const row = await db.saveFood(toRow(state.food));
   const n = nutrientsFor(state.food, grams);
   const values = {
@@ -797,7 +1073,7 @@ document.addEventListener('click', (ev) => {
 });
 
 // Add sheet
-$('open-add').addEventListener('click', () => openAdd().catch(fail));
+$('open-add').addEventListener('click', () => openAdd(false).catch(fail));
 $('food-q').addEventListener('input', (ev) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => runSearch(ev.target.value).catch(fail), 400);
@@ -825,6 +1101,65 @@ $('ai-reset').addEventListener('click', resetAi);
 $('label-photo').addEventListener('change', (ev) => {
   if (ev.target.files[0]) readLabelPhoto(ev.target.files[0]);
   ev.target.value = '';
+});
+
+// Recipes
+$('open-recipe').addEventListener('click', newRecipe);
+$('add-close').addEventListener('click', () => (state.recipeMode ? showRecipe() : $('add').close()));
+$('food-edit-recipe').addEventListener('click', () => editRecipe(state.food));
+$('recipe-add').addEventListener('click', () => {
+  state.recipe.name = $('recipe-form').name.value;
+  state.recipe.servings = $('recipe-form').servings.value;
+  openAdd(true).catch(fail);
+});
+$('recipe-items').addEventListener('input', (ev) => {
+  const i = ev.target.dataset.ramount;
+  if (i == null) return;
+  const it = state.recipe.ingredients[i];
+  const per = perUnit(it);
+  it.amount = Number(ev.target.value) || 0;
+  it.grams = per.grams * it.amount;
+  for (const k of NKEYS) it[k] = per[k] * it.amount;
+  updateRecipeTotals();
+});
+$('recipe-items').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-rremove]');
+  if (!b) return;
+  state.recipe.ingredients.splice(Number(b.dataset.rremove), 1);
+  renderRecipe();
+});
+$('recipe-form').servings.addEventListener('input', updateRecipeTotals);
+$('recipe-ai').addEventListener('click', fillRecipeWithAi);
+$('recipe-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveRecipe().catch(fail); });
+$('recipe-cancel').addEventListener('click', () => {
+  state.recipeMode = false;
+  state.recipe = null;
+  $('recipe').close();
+});
+$('recipe-delete').addEventListener('click', async () => {
+  if (!confirm(`Delete the recipe "${state.recipe.name}"? Days it was logged on keep their numbers.`)) return;
+  try {
+    await db.deleteFood(state.recipe.id);
+    state.recipe = null;
+    toast('Recipe deleted');
+    await openAdd();
+  } catch (err) { fail(err); }
+});
+
+// Weight
+$('open-weight').addEventListener('click', () => openWeight().catch(fail));
+$('weight-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveWeight().catch(fail); });
+$('weight-chart').addEventListener('pointermove', showWeightTip);
+$('weight-chart').addEventListener('pointerdown', showWeightTip);
+$('weight-chart').addEventListener('pointerleave', (ev) => { if (ev.pointerType === 'mouse') hideWeightTip(); });
+$('weight-list').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('[data-wdelete]');
+  if (!b || !confirm(`Delete the weigh-in for ${shortDate(b.dataset.wdelete)}?`)) return;
+  try {
+    await db.deleteWeight(state.personId, b.dataset.wdelete);
+    state.weights = state.weights.filter((w) => w.day !== b.dataset.wdelete);
+    renderWeight();
+  } catch (err) { fail(err); }
 });
 
 // Confirm sheet

@@ -5,6 +5,7 @@
   --ink: #ffffff; --muted: #8b94a4; --line: #1c212c; --line-strong: #2a3140;
   --accent: #5bb08a; --over: #e0795b;
   --protein: #6aa6e0; --carbs: #d6a03b; --fat: #c47ad0; --fiber: #5bb08a;
+  --weigh-dot: #6a7384; /* weight chart: weigh-ins recede, the trend (--accent) leads */
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -125,6 +126,32 @@ textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .citem-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
 .amount-in { width: 84px; flex: none !important; }
 #confirm-items .list-heading { margin: 4px 0 6px; }
+
+/* Header buttons */
+.top-actions { display: flex; gap: 8px; align-items: center; }
+.top-actions button:not(.icon) { padding: 6px 12px; font-size: 14px; }
+
+/* Recipes */
+details summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 14px; }
+details[open] summary { margin-bottom: 8px; }
+#recipe-items .citem .row { align-items: center; }
+
+/* Weight */
+.chart { position: relative; }
+.chart svg { display: block; touch-action: pan-y; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; }
+.chart .trend { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .weigh { fill: var(--weigh-dot); stroke: var(--surface); stroke-width: 2; }
+.chart .crosshair { stroke: var(--line-strong); stroke-width: 1; }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--weigh-dot); }
+.key-line { width: 14px; height: 2px; border-radius: 1px; background: var(--accent); }
+.tip { position: absolute; top: 18px; background: var(--ink); color: var(--bg); font-size: 12.5px; padding: 4px 8px;
+       border-radius: 6px; white-space: nowrap; pointer-events: none; }
+.wrow { display: grid; grid-template-columns: 1fr 1fr 1fr auto; align-items: center; gap: 8px;
+        padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
 
 /* Sheets */
 dialog {

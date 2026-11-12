@@ -73,6 +73,12 @@ The **Deploy Supabase functions** workflow then installs the server code on ever
 4. Add it as a GitHub repository secret named `ANTHROPIC_API_KEY`, the same way as in step 7.
 5. In the **Actions** tab, run **Deploy Supabase functions** (Run workflow) so the key reaches Supabase.
 
+## 9. Weight and recipes (build step 4)
+
+Run [`supabase/003_weights_and_recipes.sql`](supabase/003_weights_and_recipes.sql) in the SQL Editor,
+the same way as in step 3. Then fully close and reopen the app; if you added it to the home screen
+before step 4, delete that icon and add it again to get the new app icon.
+
 ## Later steps
 
 Each later build step may add one more SQL file in `supabase/`. You run it the same way as in step 3.

@@ -6,7 +6,7 @@
 // (behind an HTTPS proxy, add NODE_USE_ENV_PROXY=1)
 import http from 'node:http';
 import assert from 'node:assert/strict';
-import { converse, readLabel, MODEL } from '../supabase/functions/assist/lib.js';
+import { converse, readLabel, parseRecipe, MODEL } from '../supabase/functions/assist/lib.js';
 
 const { default: Anthropic } = await import(process.env.SDK || '@anthropic-ai/sdk');
 
@@ -146,6 +146,28 @@ try {
   assert.equal(t2.type, 'proposal');
   assert.ok(t2.items[0].grams > 0 && t2.items[0].unit !== 'a big glass', 'unknown unit falls back to a real serving');
   console.log(`ok  plain-text question works; unknown unit fell back to "${t2.items[0].unit}"`);
+
+  // ---- 3b. Pasted recipe ----
+  script = [
+    () => [thinking, use('r1', 'search_foods', { query: 'black beans canned' }), use('r2', 'search_foods', { query: 'onions raw' })],
+    (r) => {
+      const found = resultsFor(r);
+      assert.match(r.system, /recipe into ingredients/);
+      assert.deepEqual(r.tools.map((t) => t.name), ['search_foods', 'save_recipe']);
+      return [thinking, use('r3', 'save_recipe', { name: 'Black bean soup', servings: 4, skipped: ['epazote'], ingredients: [
+        { ref: found.r1[0].ref, amount: 30, unit: 'oz' },
+        { ref: found.r2[0].ref, amount: 1, unit: 'a big one' },
+      ] })];
+    },
+  ];
+  const recipe = await parseRecipe({ text: 'Black bean soup. Serves 4. 2 cans black beans, 1 onion, epazote' }, deps);
+  assert.equal(recipe.name, 'Black bean soup');
+  assert.equal(recipe.servings, 4);
+  assert.deepEqual(recipe.skipped, ['epazote']);
+  assert.equal(recipe.ingredients.length, 2);
+  assert.equal(Math.round(recipe.ingredients[0].grams), 850);
+  assert.ok(recipe.ingredients[1].grams > 0 && recipe.ingredients[1].unit !== 'a big one');
+  console.log(`ok  pasted recipe -> ${recipe.ingredients.map((i) => `${i.amount} ${i.unit} ${i.food.name}`).join('; ')}`);
 
   // ---- 4. Label photo ----
   script = [(r) => {
