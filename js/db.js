@@ -60,8 +60,10 @@ export async function recentFoods() {
 }
 
 export async function savedFoodByBarcode(code) {
+  // The same product's barcode can be stored as 12 (UPC), 13 (EAN) or 14 (GTIN) digits.
   const bare = code.replace(/^0+/, '');
-  const rows = check(await client.from('foods').select('*').in('barcode', [bare, `0${bare}`, `00${bare}`]).limit(1));
+  const forms = [...new Set([code, bare, bare.padStart(12, '0'), bare.padStart(13, '0'), bare.padStart(14, '0')])];
+  const rows = check(await client.from('foods').select('*').in('barcode', forms).limit(1));
   return rows[0] || null;
 }
 
@@ -76,12 +78,17 @@ export async function saveFood(food) {
   return check(await client.from('foods').upsert(row, { onConflict: 'source,source_id' }).select().single());
 }
 
-// The "food" Edge Function: { action: 'search', query } | { action: 'barcode', code } | { action: 'details', id }
-export async function lookup(body) {
-  const { data, error } = await client.functions.invoke('food', { body });
+async function callFunction(name, body, fallbackMessage) {
+  const { data, error } = await client.functions.invoke(name, { body });
   if (error) {
     const detail = await error.context?.json?.().catch(() => null);
-    throw new Error(detail?.error || 'Food lookup is not available right now');
+    throw new Error(detail?.error || fallbackMessage);
   }
   return data;
 }
+
+// The "food" Edge Function: { action: 'search', query } | { action: 'barcode', code } | { action: 'details', id }
+export const lookup = (body) => callFunction('food', body, 'Food lookup is not available right now');
+
+// The "assist" Edge Function: { action: 'chat', text, messages, context } | { action: 'label', image, barcode }
+export const assist = (body) => callFunction('assist', body, 'The AI is not available right now');

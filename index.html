@@ -48,6 +48,18 @@
 
 <dialog id="add">
   <div class="stack">
+    <form id="ai-form" class="stack">
+      <div id="ai-chat" class="chat" hidden></div>
+      <textarea id="ai-text" rows="2" enterkeyhint="send" aria-label="What did you eat?"
+        placeholder="What did you eat? e.g. 2 eggs and toast with butter"></textarea>
+      <div class="actions">
+        <span id="ai-status" class="hint"></span>
+        <span class="spacer"></span>
+        <button id="ai-reset" type="button" class="link" hidden>Start over</button>
+        <button id="ai-send" class="primary" type="submit">Log it</button>
+      </div>
+    </form>
+    <p class="divider">or search</p>
     <form id="search-form" class="row" role="search">
       <input id="food-q" type="search" placeholder="Search foods" autocomplete="off" enterkeyhint="search" aria-label="Search foods">
       <button id="open-scanner" type="button">Scan</button>
@@ -56,7 +68,10 @@
     <p id="results-note" class="hint"></p>
     <div id="results"></div>
     <div class="actions">
-      <button id="open-quick" type="button" class="link">Quick add: type in the numbers</button>
+      <button id="open-quick" type="button" class="link">Quick add</button>
+      <label class="link filelink">Snap a label
+        <input id="label-photo" type="file" accept="image/*" capture="environment">
+      </label>
       <span class="spacer"></span>
       <button type="button" data-close>Close</button>
     </div>
@@ -108,6 +123,27 @@
       <span class="spacer"></span>
       <button id="food-back" type="button">Back</button>
       <button class="primary" type="submit">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="confirm">
+  <form id="confirm-form" class="stack">
+    <h2>Check and save</h2>
+    <div id="confirm-items"></div>
+    <label>Meal
+      <select name="meal">
+        <option value="breakfast">Breakfast</option>
+        <option value="lunch">Lunch</option>
+        <option value="dinner">Dinner</option>
+        <option value="snack">Snacks</option>
+      </select>
+    </label>
+    <p id="confirm-after" class="hint"></p>
+    <div class="actions">
+      <button id="confirm-back" type="button">Back</button>
+      <span class="spacer"></span>
+      <button class="primary" type="submit">Save all</button>
     </div>
   </form>
 </dialog>

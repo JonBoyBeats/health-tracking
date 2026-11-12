@@ -51,7 +51,7 @@ export function caloriesMatch(p) {
   return diff <= 25 || diff / Math.max(p.calories, fromMacros) <= 0.2;
 }
 
-function finish(food) {
+export function finish(food) {
   const p = food.per100;
   if (p.calories == null) p.calories = round1(4 * p.protein + 4 * p.carbs + 9 * p.fat);
   for (const k in p) p[k] = Math.max(0, round1(p[k] ?? 0)); // USDA's carbs "by difference" can dip below 0
@@ -82,7 +82,7 @@ function usdaServings(f) {
     const grams = Number(m.gramWeight);
     const label = m.disseminationText || m.portionDescription
       || [m.amount, m.measureUnit?.name !== 'undetermined' ? m.measureUnit?.name : '', m.modifier].filter(Boolean).join(' ');
-    if (grams > 0 && label && !/quantity not specified/i.test(label)) out.push({ label: `${label} (${round1(grams)} g)`, grams });
+    if (grams > 0 && label && !/quantity not specified|guideline amount/i.test(label)) out.push({ label: `${label} (${round1(grams)} g)`, grams });
   }
   return out;
 }

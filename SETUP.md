@@ -64,6 +64,15 @@ from what's written here.
 The **Deploy Supabase functions** workflow then installs the server code on every change to
 `supabase/functions/`. You can also run it by hand from the Actions tab.
 
+## 8. AI logging and label photos (build step 3)
+
+1. At [console.anthropic.com](https://console.anthropic.com), create an account and add a payment method.
+   This is billed separately from any Claude subscription.
+2. Under **Billing → Limits**, set a monthly spending limit (for example $20).
+3. Under **API Keys**, create a key named `health-tracking` and copy it.
+4. Add it as a GitHub repository secret named `ANTHROPIC_API_KEY`, the same way as in step 7.
+5. In the **Actions** tab, run **Deploy Supabase functions** (Run workflow) so the key reaches Supabase.
+
 ## Later steps
 
 Each later build step may add one more SQL file in `supabase/`. You run it the same way as in step 3.
