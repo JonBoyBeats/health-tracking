@@ -45,3 +45,43 @@ export async function updateEntry(id, fields) {
 export async function deleteEntry(id) {
   check(await client.from('log_entries').delete().eq('id', id));
 }
+
+// ---------- foods ----------
+
+// Saved foods whose name or brand contains every word typed.
+export async function searchSavedFoods(text) {
+  let q = client.from('foods').select('*');
+  for (const w of text.toLowerCase().split(/\s+/).filter(Boolean)) q = q.ilike('search_text', `%${w}%`);
+  return check(await q.order('last_used_at', { ascending: false }).limit(8));
+}
+
+export async function recentFoods() {
+  return check(await client.from('foods').select('*').order('last_used_at', { ascending: false }).limit(15));
+}
+
+export async function savedFoodByBarcode(code) {
+  const bare = code.replace(/^0+/, '');
+  const rows = check(await client.from('foods').select('*').in('barcode', [bare, `0${bare}`, `00${bare}`]).limit(1));
+  return rows[0] || null;
+}
+
+export async function getFood(id) {
+  return check(await client.from('foods').select('*').eq('id', id).single());
+}
+
+// Saves a food to the shared list (or refreshes it if it's already there) and returns its row.
+export async function saveFood(food) {
+  const row = { ...food, last_used_at: new Date().toISOString() };
+  if (row.id) return check(await client.from('foods').update(row).eq('id', row.id).select().single());
+  return check(await client.from('foods').upsert(row, { onConflict: 'source,source_id' }).select().single());
+}
+
+// The "food" Edge Function: { action: 'search', query } | { action: 'barcode', code } | { action: 'details', id }
+export async function lookup(body) {
+  const { data, error } = await client.functions.invoke('food', { body });
+  if (error) {
+    const detail = await error.context?.json?.().catch(() => null);
+    throw new Error(detail?.error || 'Food lookup is not available right now');
+  }
+  return data;
+}

@@ -49,6 +49,21 @@ from what's written here.
 1. Open the link in Safari or Chrome and sign in.
 2. Tap **Share → Add to Home Screen**. From then on, open it from the home screen icon.
 
+## 7. Food search and barcodes (build step 2)
+
+1. Run [`supabase/002_foods.sql`](supabase/002_foods.sql) in the SQL Editor, the same way as in step 3.
+2. Get a free USDA key at [api.data.gov/signup](https://api.data.gov/signup). It arrives by email.
+3. Create a Supabase access token at
+   [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens).
+   It lets GitHub install the app's server code. Treat it like a password.
+4. In this repo on GitHub, go to **Settings → Secrets and variables → Actions → New repository secret**
+   and add:
+   - `SUPABASE_ACCESS_TOKEN`: the token from step 3
+   - `USDA_API_KEY`: the key from step 2
+
+The **Deploy Supabase functions** workflow then installs the server code on every change to
+`supabase/functions/`. You can also run it by hand from the Actions tab.
+
 ## Later steps
 
 Each later build step may add one more SQL file in `supabase/`. You run it the same way as in step 3.

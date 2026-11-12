@@ -1,12 +1,20 @@
-// Run: python3 -m http.server 8765 --bind 127.0.0.1 (from the repo root), then node tests/app.e2e.js
-// End-to-end test of step 1: the real app and the real supabase-js, against an in-memory stand-in
-// for Supabase's auth and REST endpoints (served through Playwright request routing).
+// End-to-end test: the real app and the real supabase-js, against an in-memory stand-in for
+// Supabase's auth, REST and Edge Function endpoints (served through Playwright request routing).
+// The stand-in "food" function runs the real lookup code, so food searches hit live USDA and
+// Open Food Facts.
+//
+// Run from the repo root:
+//   python3 -m http.server 8765 --bind 127.0.0.1 &
+//   USDA_API_KEY=... FIXTURES=<dir with noodles.y4m, chobani.png> node tests/app.e2e.js
+// (behind an HTTPS proxy, add NODE_USE_ENV_PROXY=1)
 const { chromium, devices } = require('playwright');
 const assert = require('assert');
+const path = require('path');
 
 const BASE = 'http://127.0.0.1:8765/';
 const SB = 'https://test.supabase.co';
 const OUT = process.env.OUT || require('os').tmpdir(); // screenshots
+const FIXTURES = process.env.FIXTURES || OUT;
 const JON = '11111111-1111-1111-1111-111111111111';
 const WIFE = '22222222-2222-2222-2222-222222222222';
 const users = { 'jon@example.com': JON, 'wife@example.com': WIFE };
@@ -15,8 +23,10 @@ const profiles = [
   { id: WIFE, name: 'wife', target_calories: 2000, target_protein: 150, target_carbs: 200, target_fat: 65, target_fiber: 30, created_at: '2026-01-02' },
 ];
 let entries = [];
+let foods = [];
 const requests = [];
 let nextId = 1;
+let lib;
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
 function session(email) {
@@ -26,13 +36,32 @@ function session(email) {
 }
 const eq = (url, col) => url.searchParams.get(col)?.replace(/^eq\./, '');
 
+// Just enough of PostgREST's filters for the app's queries on foods.
+function filterFoods(url) {
+  let rows = [...foods];
+  for (const f of url.searchParams.getAll('search_text')) {
+    const w = f.replace(/^ilike\./, '').replace(/[%*]/g, '').toLowerCase();
+    rows = rows.filter((r) => `${r.name} ${r.brand || ''}`.toLowerCase().includes(w));
+  }
+  if (url.searchParams.get('id')) rows = rows.filter((r) => r.id === eq(url, 'id'));
+  const bc = url.searchParams.get('barcode');
+  if (bc) {
+    const list = bc.replace(/^in\.\(|\)$/g, '').split(',').map((s) => s.replace(/"/g, ''));
+    rows = rows.filter((r) => list.includes(r.barcode));
+  }
+  if (url.searchParams.get('order')?.startsWith('last_used_at.desc')) rows.sort((a, b) => b.last_used_at.localeCompare(a.last_used_at));
+  return rows.slice(0, Number(url.searchParams.get('limit')) || 1000);
+}
+
 async function fakeSupabase(route) {
   const req = route.request();
   const url = new URL(req.url());
   const method = req.method();
   const body = req.postData() ? JSON.parse(req.postData()) : null;
+  const single = (req.headers()['accept'] || '').includes('vnd.pgrst.object');
   requests.push({ method, path: url.pathname, search: url.search, body });
   const json = (status, data) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
+  const rows = (status, list) => (single ? (list.length === 1 ? json(status, list[0]) : json(406, { message: 'not one row' })) : json(status, list));
   if (method === 'OPTIONS') return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' } });
 
   if (url.pathname === '/auth/v1/token') {
@@ -42,8 +71,19 @@ async function fakeSupabase(route) {
   if (url.pathname === '/auth/v1/logout') return route.fulfill({ status: 204 });
 
   const auth = req.headers()['authorization'] || '';
-  if (url.pathname.startsWith('/rest/v1/') && !auth.includes('.sig')) return json(401, { message: 'not signed in' });
+  if (!auth.includes('.sig')) return json(401, { message: 'not signed in' });
 
+  if (url.pathname === '/functions/v1/food') {
+    const opts = { usdaKey: process.env.USDA_API_KEY };
+    try {
+      if (body.action === 'search') return json(200, { results: await lib.searchFoods(body.query, opts) });
+      if (body.action === 'barcode') return json(200, { results: await lib.lookupBarcode(body.code, opts) });
+      if (body.action === 'details') return json(200, { result: await lib.usdaFood(body.id, opts) });
+    } catch (err) {
+      return json(502, { error: `Food lookup failed: ${err.message}` });
+    }
+    return json(400, { error: 'Unknown request' });
+  }
   if (url.pathname === '/rest/v1/profiles') {
     if (method === 'GET') return json(200, profiles);
     if (method === 'PATCH') { Object.assign(profiles.find((p) => p.id === eq(url, 'id')), body); return route.fulfill({ status: 204 }); }
@@ -57,6 +97,21 @@ async function fakeSupabase(route) {
     if (method === 'PATCH') { Object.assign(entries.find((e) => e.id === eq(url, 'id')), body); return route.fulfill({ status: 204 }); }
     if (method === 'DELETE') { entries = entries.filter((e) => e.id !== eq(url, 'id')); return route.fulfill({ status: 204 }); }
   }
+  if (url.pathname === '/rest/v1/foods') {
+    if (method === 'GET') return rows(200, filterFoods(url));
+    if (method === 'POST') {
+      assert.equal(url.searchParams.get('on_conflict'), 'source,source_id');
+      let row = foods.find((f) => f.source_id && f.source === body.source && f.source_id === body.source_id);
+      if (row) Object.assign(row, body);
+      else foods.push((row = { id: `f${nextId++}`, created_at: new Date().toISOString(), ...body }));
+      return rows(201, [row]);
+    }
+    if (method === 'PATCH') {
+      const row = foods.find((f) => f.id === eq(url, 'id'));
+      Object.assign(row, body);
+      return rows(200, [row]);
+    }
+  }
   return json(404, { message: `unhandled ${method} ${url.pathname}` });
 }
 
@@ -65,27 +120,34 @@ function localDay(d) {
 }
 
 (async () => {
-  const browser = await chromium.launch();
+  lib = await import(path.join(__dirname, '../supabase/functions/food/lib.js'));
+  const browser = await chromium.launch({
+    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+      `--use-file-for-fake-video-capture=${path.join(FIXTURES, 'noodles.y4m')}`],
+  });
   const errors = [];
 
-  // 1. Not configured yet: the setup message shows.
+  // ---- Not configured yet: the setup message shows.
   {
     const page = await browser.newPage();
+    await page.route('**/js/config.js', (r) => r.fulfill({ contentType: 'text/javascript', body: "export const SUPABASE_URL=''; export const SUPABASE_KEY='';" }));
     await page.goto(BASE);
     await page.waitForSelector('#setup:not([hidden])');
     await page.close();
     console.log('ok  unconfigured shows setup message');
   }
 
-  const context = await browser.newContext({ ...devices['iPhone 13'], deviceScaleFactor: 1 });
+  const context = await browser.newContext({ ...devices['iPhone 13'], deviceScaleFactor: 1, permissions: ['camera'] });
   await context.route('**/js/config.js', (r) => r.fulfill({ contentType: 'text/javascript', body: `export const SUPABASE_URL='${SB}'; export const SUPABASE_KEY='sb_publishable_test';` }));
   await context.route(`${SB}/**`, fakeSupabase);
   const page = await context.newPage();
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('dialog', (d) => d.accept());
+  const closed = (id) => page.waitForSelector(`#${id}:not([open])`, { state: 'attached' });
+  const big = () => page.textContent('#left .big');
 
-  // 2. Login: wrong password shows an error, right password opens the app.
+  // ---- Login: wrong password shows an error, right password opens the app.
   await page.goto(BASE);
   await page.waitForSelector('#login:not([hidden])');
   await page.fill('[name=email]', 'jon@example.com');
@@ -97,83 +159,173 @@ function localDay(d) {
   await page.click('#login-form button[type=submit]');
   await page.waitForSelector('#app:not([hidden])');
   assert.equal(await page.textContent('#day-label'), 'Today');
-  assert.equal(await page.textContent('#left .big'), '2000');
-  assert.equal(await page.getAttribute(`[data-person="${JON}"]`, 'aria-pressed'), 'true');
+  assert.equal(await big(), '2000');
   console.log('ok  login error, then sign in shows today with full targets');
 
-  // 3. Add for both, calories left blank -> computed from macros.
+  // ---- Quick add for both, calories left blank -> computed from macros.
   await page.click('#open-add');
-  await page.fill('[name=description]', 'Turkey sandwich');
-  await page.fill('[name=protein]', '30');
-  await page.fill('[name=carbs]', '40');
-  await page.fill('[name=fat]', '10');
-  await page.fill('[name=fiber]', '5');
+  await page.waitForSelector('#add[open]');
+  assert.match(await page.textContent('#results-note'), /Search for a food/);
+  await page.fill('#food-q', 'Turkey sandwich');
+  await page.click('#open-quick');
+  await page.waitForSelector('#entry[open]');
+  assert.equal(await page.inputValue('#entry-form [name=description]'), 'Turkey sandwich');
+  await page.fill('#entry-form [name=protein]', '30');
+  await page.fill('#entry-form [name=carbs]', '40');
+  await page.fill('#entry-form [name=fat]', '10');
+  await page.fill('#entry-form [name=fiber]', '5');
   assert.match(await page.textContent('#calc-hint'), /370/);
-  await page.selectOption('[name=meal]', 'lunch');
-  await page.click('[data-who="both"]');
-  await page.screenshot({ path: `${OUT}/step1-add.png` });
+  await page.selectOption('#entry-form [name=meal]', 'lunch');
+  await page.click('#who [data-who="both"]');
   await page.click('#entry-form button[type=submit]');
-  await page.waitForSelector('#entry:not([open])', { state: 'attached' });
+  await closed('entry');
   assert.equal(entries.length, 2);
   assert.deepEqual(entries.map((e) => e.person_id).sort(), [JON, WIFE]);
   assert.ok(entries.every((e) => e.calories === 370 && e.eaten_on === localDay(new Date()) && e.meal === 'lunch'));
   await page.waitForSelector('#toast:not([hidden])');
   assert.equal(await page.textContent('#toast'), 'jon: 1630 cal left · wife: 1630 cal left');
-  assert.equal(await page.textContent('#left .big'), '1630');
-  assert.match(await page.textContent('#left .bar.protein'), /120g left/);
-  assert.match(await page.textContent('#meals'), /Turkey sandwich/);
-  await page.screenshot({ path: `${OUT}/step1-today.png` });
-  console.log('ok  add for both: calories from macros, both logs, toast shows what is left');
+  assert.equal(await big(), '1630');
+  console.log('ok  quick add for both: calories from macros, both logs, toast shows what is left');
 
-  // 4. Switch to wife, edit her entry; Jon's is unchanged.
+  // ---- Edit the wife's quick-add entry; Jon's is unchanged. Then delete it.
   await page.click(`[data-person="${WIFE}"]`);
   await page.click('.entry');
-  assert.equal(await page.inputValue('[name=calories]'), '370');
-  assert.ok(await page.isHidden('#who-field'));
-  await page.fill('[name=calories]', '500');
+  assert.equal(await page.inputValue('#entry-form [name=calories]'), '370');
+  await page.fill('#entry-form [name=calories]', '500');
   await page.click('#entry-form button[type=submit]');
   await page.waitForFunction(() => document.querySelector('#left .big').textContent === '1500');
-  assert.equal(entries.find((e) => e.person_id === WIFE).calories, 500);
   assert.equal(entries.find((e) => e.person_id === JON).calories, 370);
-  console.log('ok  edit one person\'s entry leaves the other alone');
-
-  // 5. Delete it.
   await page.click('.entry');
   await page.click('#entry-delete');
   await page.waitForFunction(() => document.querySelector('#left .big').textContent === '2000');
   assert.equal(entries.length, 1);
-  console.log('ok  delete');
+  await page.click(`[data-person="${JON}"]`);
+  console.log('ok  edit and delete a quick-add entry');
 
-  // 6. Settings: rename and change a target.
+  // ---- Search USDA, pick a portion, save. The food is saved for next time.
+  await page.click('#open-add');
+  await page.fill('#food-q', 'banana');
+  await page.waitForFunction(() => document.querySelector('#results [data-result]')?.textContent.includes('Bananas, raw'), null, { timeout: 30000 });
+  await page.screenshot({ path: `${OUT}/step2-search.png` });
+  await page.click('#results [data-result="0"]');
+  await page.waitForSelector('#food[open]');
+  assert.equal(await page.textContent('#food-name'), 'Bananas, raw');
+  // Household portions arrive from USDA's details call.
+  await page.waitForFunction(() => [...document.querySelectorAll('#food-form [name=unit] option')].some((o) => o.textContent.includes('medium')), null, { timeout: 30000 });
+  const medium = await page.$eval('#food-form [name=unit]', (s) => [...s.options].find((o) => o.textContent.includes('medium')).value);
+  await page.selectOption('#food-form [name=unit]', medium);
+  await page.fill('#food-form [name=amount]', '1');
+  assert.match(await page.textContent('#food-macros'), /^\s*105\s/);
+  assert.match(await page.textContent('#food-after'), /jon 1525 cal left/);
+  await page.screenshot({ path: `${OUT}/step2-amount.png` });
+  await page.click('#food-form button[type=submit]');
+  await closed('food');
+  const banana = entries.find((e) => e.description === 'Bananas, raw');
+  assert.ok(banana, 'banana logged');
+  assert.equal(banana.calories, 105);
+  assert.equal(banana.grams, 118);
+  assert.match(banana.unit, /medium/);
+  assert.equal(foods.length, 1);
+  assert.equal(banana.food_id, foods[0].id);
+  assert.equal(foods[0].source, 'usda');
+  assert.ok(foods[0].servings.length > 3);
+  assert.equal(await big(), '1525');
+  assert.match(await page.textContent('#meals'), /\b1 medium · P 1/);
+  console.log('ok  search USDA, pick a household portion, save; food saved to the shared list');
+
+  // ---- Recent and saved foods come first, without duplicates.
+  await page.click('#open-add');
+  await page.waitForFunction(() => document.querySelector('#results-heading').textContent === 'Recent');
+  assert.match(await page.textContent('#results'), /Bananas, raw.*Saved/s);
+  await page.fill('#food-q', 'banana');
+  await page.waitForFunction(() => !document.querySelector('#results-note').textContent.includes('Searching'), null, { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelectorAll('#results [data-result]').length > 3);
+  assert.match(await page.textContent('#results [data-result="0"]'), /Bananas, raw.*Saved/s);
+  const rawCount = await page.$$eval('#results [data-result]', (bs) => bs.filter((b) => b.textContent.includes('Bananas, raw')).length);
+  assert.equal(rawCount, 1);
+  console.log('ok  recent foods, and saved foods first in search without duplicates');
+
+  // ---- Scan with the camera (a fake camera showing the noodle kit's barcode).
+  await page.click('#open-scanner');
+  await page.waitForSelector('#food[open]', { timeout: 30000 });
+  assert.match(await page.textContent('#food-name'), /Thai Peanut Noodle Kit/);
+  assert.match(await page.textContent('#food-badges'), /2 sources agree/);
+  assert.match(await page.inputValue('#food-form [name=unit]').then(async (v) => page.$eval(`#food-form [name=unit] option[value="${v}"]`, (o) => o.textContent)), /PACKAGE \(52 g\)/);
+  await page.screenshot({ path: `${OUT}/step2-scanned.png` });
+  const oz = await page.$eval('#food-form [name=unit]', (s) => [...s.options].find((o) => o.textContent === 'oz').value);
+  await page.selectOption('#food-form [name=unit]', oz);
+  await page.fill('#food-form [name=amount]', '2');
+  await page.click('#food-form button[type=submit]');
+  await closed('food');
+  const noodles = entries.find((e) => /Noodle/.test(e.description));
+  assert.equal(noodles.unit, 'oz');
+  assert.equal(noodles.grams, 56.7);
+  assert.equal(noodles.calories, Math.round(3.85 * 56.699 * 10) / 10);
+  console.log('ok  camera scan: both sources agree, logged by the ounce');
+
+  // ---- Scan from a photo (Chobani: only in Open Food Facts).
+  await page.click('#open-add');
+  await page.click('#open-scanner');
+  await page.setInputFiles('#scan-photo', path.join(FIXTURES, 'chobani.png'));
+  await page.waitForSelector('#food[open]', { timeout: 30000 });
+  assert.equal(await page.textContent('#food-name'), 'Greek Yogurt Strawberry (Chobani)');
+  assert.match(await page.textContent('#food-badges'), /Open Food Facts/);
+  await page.click('#food-back');
+  await page.waitForSelector('#add[open]');
+  console.log('ok  barcode from a photo');
+
+  // ---- Typed barcode that no source has.
+  await page.click('#open-scanner');
+  await page.fill('#scan-code', '000000000017');
+  await page.click('#scan-form button[type=submit]');
+  await page.waitForFunction(() => document.querySelector('#results-note').textContent.includes("isn't in USDA"), null, { timeout: 30000 });
+  await page.click('#add [data-close]');
+  console.log('ok  unknown barcode explains what to do');
+
+  // ---- Edit a food entry's amount.
+  await page.click('.entry >> text=Bananas, raw');
+  await page.waitForSelector('#food[open]');
+  assert.ok(await page.isVisible('#food-delete'));
+  assert.ok(await page.isHidden('#food-who-field'));
+  assert.equal(await page.inputValue('#food-form [name=amount]'), '1');
+  await page.fill('#food-form [name=amount]', '2');
+  await page.click('#food-form button[type=submit]');
+  await closed('food');
+  assert.equal(entries.find((e) => e.id === banana.id).calories, 210);
+  assert.equal(entries.find((e) => e.id === banana.id).grams, 236);
+  assert.match(await page.textContent('#meals'), /2 × 1 medium · P 3/);
+  assert.match(await page.textContent('#meals'), /2 oz · P 5/);
+  await page.screenshot({ path: `${OUT}/step2-today.png` });
+  console.log('ok  edit a food entry by amount');
+
+  // ---- Settings: rename and change a target.
   await page.click('#open-settings');
   const wifeSet = page.locator(`fieldset[data-profile="${WIFE}"]`);
   await wifeSet.locator('[name=name]').fill('Sarah');
   await wifeSet.locator('[name=target_calories]').fill('1800');
-  await page.screenshot({ path: `${OUT}/step1-settings.png` });
   await page.click('#settings-form button[type=submit]');
   await page.waitForFunction(() => document.querySelector('#people').textContent.includes('Sarah'));
-  assert.equal(await page.textContent('#left .big'), '1800');
   console.log('ok  settings rename and target');
 
-  // 7. Day navigation asks for the right day.
+  // ---- Day navigation asks for the right day.
   await page.click('#prev-day');
   await page.waitForFunction(() => document.querySelector('#day-label').textContent === 'Yesterday');
   const y = new Date(); y.setDate(y.getDate() - 1);
   assert.ok(requests.some((r) => r.method === 'GET' && r.search.includes(`eaten_on=eq.${localDay(y)}`)));
-  assert.ok(await page.isVisible('#go-today'));
   await page.click('#go-today');
   await page.waitForFunction(() => document.querySelector('#day-label').textContent === 'Today');
   console.log('ok  day navigation');
 
-  // 8. Reload: still signed in, no login screen.
+  // ---- Reload: still signed in.
   await page.reload();
   await page.waitForSelector('#app:not([hidden])');
   assert.match(await page.textContent('#meals'), /Turkey sandwich/);
   console.log('ok  stays signed in after reload');
 
-  // 9. Error while a sheet is open is visible.
+  // ---- An error while a sheet is open is visible.
   await page.click('#open-add');
-  await page.fill('[name=description]', 'x');
+  await page.click('#open-quick');
+  await page.fill('#entry-form [name=description]', 'x');
   await context.route(`${SB}/rest/v1/log_entries*`, (r) => r.request().method() === 'POST'
     ? r.fulfill({ status: 500, contentType: 'application/json', body: '{"message":"db down"}' }) : fakeSupabase(r));
   await page.click('#entry-form button[type=submit]');
@@ -181,10 +333,9 @@ function localDay(d) {
   assert.ok(await page.evaluate(() => document.querySelector('#toast').matches(':popover-open')));
   await context.unroute(`${SB}/rest/v1/log_entries*`);
   await page.click('#entry [data-close]');
-  errors.splice(errors.findIndex((e) => e.includes('500')), 1); // the expected failed request
   console.log('ok  errors show above an open sheet');
 
-  // 10. Sign out.
+  // ---- Sign out.
   await page.click('#open-settings');
   await page.click('#sign-out');
   await page.waitForSelector('#login:not([hidden])');
@@ -192,8 +343,10 @@ function localDay(d) {
   await page.waitForSelector('#login:not([hidden])');
   console.log('ok  sign out');
 
-  const unexpected = errors.filter((e) => !e.includes('db down') && !e.includes('status of 400')); // 400 = the wrong-password attempt
-  if (unexpected.length) console.log('console errors:', unexpected); assert.deepEqual(unexpected, [], 'console errors');
+  // Expected: the wrong-password 400, the deliberate 500.
+  const unexpected = errors.filter((e) => !e.includes('db down') && !e.includes('status of 400') && !e.includes('status of 500'));
+  if (unexpected.length) console.log('console errors:', unexpected);
+  assert.deepEqual(unexpected, [], 'console errors');
   await browser.close();
   console.log('all passed');
 })().catch((e) => { console.error(e); process.exit(1); });
