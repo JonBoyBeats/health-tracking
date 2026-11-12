@@ -24,6 +24,7 @@ const profiles = [
 ];
 let entries = [];
 let foods = [];
+let weights = [];
 const requests = [];
 let nextId = 1;
 let lib, assistLib;
@@ -96,6 +97,7 @@ async function fakeSupabase(route) {
     try {
       if (body.action === 'chat') return json(200, await assistLib.converse(body, deps));
       if (body.action === 'label') return json(200, { result: await assistLib.readLabel(body, deps) });
+      if (body.action === 'recipe') return json(200, await assistLib.parseRecipe(body, deps));
     } catch (err) {
       return json(502, { error: err.message });
     }
@@ -127,6 +129,18 @@ async function fakeSupabase(route) {
       Object.assign(row, body);
       return rows(200, [row]);
     }
+    if (method === 'DELETE') { foods = foods.filter((f) => f.id !== eq(url, 'id')); return route.fulfill({ status: 204 }); }
+  }
+  if (url.pathname === '/rest/v1/weights') {
+    const person = eq(url, 'person_id');
+    if (method === 'GET') return json(200, weights.filter((w) => w.person_id === person).sort((a, b) => a.measured_on.localeCompare(b.measured_on)).map(({ measured_on, pounds }) => ({ measured_on, pounds })));
+    if (method === 'POST') {
+      assert.equal(url.searchParams.get('on_conflict'), 'person_id,measured_on');
+      weights = weights.filter((w) => !(w.person_id === body.person_id && w.measured_on === body.measured_on));
+      weights.push(body);
+      return route.fulfill({ status: 201 });
+    }
+    if (method === 'DELETE') { weights = weights.filter((w) => !(w.person_id === person && w.measured_on === eq(url, 'measured_on'))); return route.fulfill({ status: 204 }); }
   }
   return json(404, { message: `unhandled ${method} ${url.pathname}` });
 }
@@ -182,7 +196,7 @@ function localDay(d) {
   // ---- Quick add for both, calories left blank -> computed from macros.
   await page.click('#open-add');
   await page.waitForSelector('#add[open]');
-  assert.match(await page.textContent('#results-note'), /Search for a food/);
+  await page.waitForFunction(() => document.querySelector('#results-note').textContent.includes('Search for a food'));
   await page.fill('#food-q', 'Turkey sandwich');
   await page.click('#open-quick');
   await page.waitForSelector('#entry[open]');
@@ -300,7 +314,7 @@ function localDay(d) {
   await page.fill('#scan-code', '000000000017');
   await page.click('#scan-form button[type=submit]');
   await page.waitForFunction(() => document.querySelector('#results-note').textContent.includes("isn't in USDA"), null, { timeout: 30000 });
-  await page.click('#add [data-close]');
+  await page.click('#add-close');
   console.log('ok  unknown barcode explains what to do');
 
   // ---- Edit a food entry's amount.
@@ -394,8 +408,117 @@ function localDay(d) {
   await page.waitForSelector('#food[open]');
   assert.match(await page.textContent('#food-badges'), /Saved/);
   await page.click('#food-back');
-  await page.click('#add [data-close]');
+  await page.click('#add-close');
   console.log('ok  label photo for an unknown barcode; the next scan finds it saved');
+
+  // ---- Recipes: a saved food plus an AI-read ingredient, adjust, save, log a serving, edit.
+  await page.click('#open-add');
+  await page.click('#open-recipe');
+  await page.waitForSelector('#recipe[open]');
+  await page.fill('#recipe-form [name=name]', 'Banana oat bowl');
+  await page.fill('#recipe-form [name=servings]', '2');
+  await page.click('#recipe-add');
+  await page.waitForSelector('#add[open]');
+  assert.ok(await page.isVisible('#add-title'));
+  assert.ok(await page.isHidden('#ai-form'));
+  await page.fill('#food-q', 'banana');
+  await page.waitForFunction(() => /Bananas, raw.*Saved/s.test(document.querySelector('#results [data-result="0"]')?.textContent), null, { timeout: 30000 });
+  await page.click('#results [data-result="0"]');
+  await page.waitForSelector('#food[open]');
+  assert.equal(await page.textContent('#food-save'), 'Add to recipe');
+  assert.ok(await page.isHidden('#food-who-field'));
+  assert.ok(await page.isHidden('#food-meal-field'));
+  await page.fill('#food-form [name=amount]', '2');
+  await page.click('#food-form button[type=submit]');
+  await page.waitForSelector('#recipe[open]');
+  assert.equal(await page.inputValue('#recipe-form [name=name]'), 'Banana oat bowl', 'name kept while picking');
+  assert.match(await page.textContent('#recipe-items'), /Bananas, raw/);
+  // Paste a recipe line for the AI to fill in.
+  aiScript = [
+    () => [use('r1', 'search_foods', { query: 'rolled oats' })],
+    (r) => {
+      const oats = JSON.parse(r.messages.at(-1).content[0].content)[0];
+      return [use('r2', 'save_recipe', { name: 'Oats', servings: 2, skipped: ['cinnamon'], ingredients: [{ ref: oats.ref, amount: 80, unit: 'g' }] })];
+    },
+  ];
+  await page.click('#recipe-paste summary');
+  await page.fill('#recipe-text', '80 g rolled oats, pinch of cinnamon, serves 2');
+  await page.click('#recipe-ai');
+  await page.waitForFunction(() => document.querySelectorAll('#recipe-items .citem').length === 2, null, { timeout: 30000 });
+  assert.match(await page.textContent('#toast'), /cinnamon/);
+  assert.equal(await page.inputValue('#recipe-form [name=name]'), 'Banana oat bowl', 'AI keeps a name already typed');
+  // 2 bananas -> 1: the totals follow.
+  const wholeBefore = await page.textContent('#recipe-totals');
+  await page.fill('#recipe-items [data-ramount="0"]', '1');
+  assert.notEqual(await page.textContent('#recipe-totals'), wholeBefore);
+  await page.screenshot({ path: `${OUT}/step4-recipe.png` });
+  await page.click('#recipe-form button[type=submit]');
+  await page.waitForSelector('#add[open]');
+  const recipe = foods.find((f) => f.source === 'recipe');
+  assert.equal(recipe.ingredients.length, 2);
+  assert.equal(recipe.ingredients[0].amount, 1);
+  const total = recipe.ingredients.reduce((g, i) => g + i.grams, 0);
+  assert.equal(recipe.servings[0].grams, Math.round((total / 2) * 10) / 10);
+  assert.ok(recipe.ingredients.every((i) => i.food_id), 'ingredients saved as foods');
+  assert.ok(await page.isVisible('#ai-form'), 'add sheet back to normal');
+  await page.waitForFunction(() => document.querySelector('#results [data-result="0"]')?.textContent.includes('Banana oat bowl'));
+  assert.match(await page.textContent('#results [data-result="0"]'), /Recipe/);
+  // Log a serving.
+  await page.click('#results [data-result="0"]');
+  await page.waitForSelector('#food[open]');
+  assert.ok(await page.isVisible('#food-edit-recipe'));
+  assert.match(await page.$eval('#food-form [name=unit]', (sel) => sel.options[sel.selectedIndex].textContent), /^1 serving/);
+  await page.click('#food-form button[type=submit]');
+  await closed('food');
+  const bowl = entries.find((e) => e.description === 'Banana oat bowl');
+  assert.ok(bowl && bowl.food_id === recipe.id);
+  // Edit: 3 servings now.
+  await page.click('.entry >> text=Banana oat bowl');
+  await page.waitForSelector('#food[open]');
+  await page.click('#food-edit-recipe');
+  await page.waitForSelector('#recipe[open]');
+  assert.equal(await page.textContent('#recipe-title'), 'Edit recipe');
+  assert.equal(await page.inputValue('#recipe-form [name=servings]'), '2');
+  await page.fill('#recipe-form [name=servings]', '3');
+  await page.click('#recipe-form button[type=submit]');
+  await page.waitForSelector('#add[open]');
+  assert.equal(foods.filter((f) => f.source === 'recipe').length, 1, 'edited in place');
+  assert.equal(recipe.servings[0].grams, Math.round((total / 3) * 10) / 10);
+  await page.click('#add-close');
+  console.log('ok  recipes: build from search and AI paste, adjust, save, log a serving, edit servings');
+
+  // ---- Weight: weigh-ins, trend, chart tooltip, delete.
+  const today = localDay(new Date());
+  const shift = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return localDay(d); };
+  await page.click('#open-weight');
+  await page.waitForSelector('#weight[open]');
+  assert.match(await page.textContent('#weight-hero'), /No weigh-ins yet/);
+  assert.match(await page.textContent('#weight-day'), /today/);
+  for (let i = 20; i >= 1; i--) weights.push({ person_id: JON, measured_on: shift(-i), pounds: 185 - (20 - i) * 0.2 + (i % 3) * 0.4 });
+  await page.fill('#weight-form [name=pounds]', '180.6');
+  await page.click('#weight-form button[type=submit]');
+  await page.waitForFunction(() => document.querySelectorAll('#weight-chart circle.weigh').length === 21);
+  assert.deepEqual(weights.find((w) => w.measured_on === today), { person_id: JON, measured_on: today, pounds: 180.6 });
+  assert.match(await page.textContent('#weight-hero'), /lb trend.*Losing \d\.\d lb\/week.*Last weigh-in 180\.6 lb/s);
+  const box = await page.locator('#weight-chart svg').boundingBox();
+  await page.mouse.move(box.x + box.width - 12, box.y + box.height / 2);
+  await page.waitForSelector('#wtip:not([hidden])');
+  assert.match(await page.textContent('#wtip'), /180\.6 lb · trend/);
+  await page.screenshot({ path: `${OUT}/step4-weight.png` });
+  assert.equal(await page.$$eval('#weight-list .wrow', (r) => r.length), 14);
+  await page.click(`[data-wdelete="${today}"]`);
+  await page.waitForFunction(() => document.querySelectorAll('#weight-chart circle.weigh').length === 20);
+  assert.ok(!weights.some((w) => w.measured_on === today));
+  await page.click('#weight [data-close]');
+  console.log('ok  weight: save, trend and weekly rate, chart tooltip, delete');
+
+  // ---- Home-screen app: manifest and icons are served.
+  const manifest = await (await page.request.get(`${BASE}manifest.webmanifest`)).json();
+  assert.equal(manifest.short_name, 'Health');
+  for (const icon of [...manifest.icons.map((i) => i.src), 'icons/icon-180.png']) {
+    assert.equal((await page.request.get(BASE + icon)).status(), 200, icon);
+  }
+  console.log('ok  manifest and icons');
 
   // ---- Settings: rename and change a target.
   await page.click('#open-settings');

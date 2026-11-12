@@ -145,6 +145,15 @@ function gramsFor(food, amount, unit) {
   return s ? amount * s.grams : null;
 }
 
+// The model's amount and unit, checked against the food; a unit the food doesn't have falls back
+// to its first serving, or 100 g.
+function amountFor(food, amount, unit) {
+  const grams = gramsFor(food, amount, unit);
+  if (grams != null) return { amount, unit, grams };
+  if (food.servings[0]) return { amount: 1, unit: food.servings[0].label, grams: food.servings[0].grams };
+  return { amount: 100, unit: 'g', grams: 100 };
+}
+
 async function resolveItems(items, people, deps) {
   const byName = new Map(people.map((p) => [p.name.trim().toLowerCase(), p.id]));
   return Promise.all(items.map(async (it) => {
@@ -153,13 +162,7 @@ async function resolveItems(items, people, deps) {
       return { person_id, name: it.name, amount: it.amount, unit: it.unit, estimate: it.estimate };
     }
     const food = await resolveFood(it.ref, deps);
-    let { amount, unit } = it;
-    let grams = gramsFor(food, amount, unit);
-    if (grams == null) { // a unit the food doesn't have: fall back to its first serving, or 100 g
-      if (food.servings[0]) { unit = food.servings[0].label; amount = 1; grams = food.servings[0].grams; }
-      else { unit = 'g'; amount = 100; grams = 100; }
-    }
-    return { person_id, name: it.name, food, amount, unit, grams };
+    return { person_id, name: it.name, food, ...amountFor(food, it.amount, it.unit) };
   }));
 }
 
@@ -186,13 +189,22 @@ export async function converse({ messages = [], text, context }, deps) {
       : { role: 'user', content: text });
   }
 
+  const out = await runTools({ system: SYSTEM, tools: TOOLS, messages, deps, stopTools: ['ask_user', 'log_foods'], finish: 'log_foods' });
+  if (out.question) return { type: 'question', question: out.question, messages: out.messages };
+  if (out.call.name === 'ask_user') return { type: 'question', question: out.call.input.question, messages: out.messages };
+  return { type: 'proposal', items: await resolveItems(out.call.input.items, context.people, deps), messages: out.messages };
+}
+
+// The tool loop: runs search_foods calls until the model calls one of stopTools (returned as
+// { call, messages }) or asks a question in plain text ({ question, messages }).
+async function runTools({ system, tools, messages, deps, stopTools, finish, allowQuestions = true }) {
   for (let step = 0; step < MAX_STEPS; step++) {
     const response = await deps.client.messages.create({
       model: MODEL,
       max_tokens: 8000,
       output_config: { effort: 'medium' },
-      system: SYSTEM,
-      tools: TOOLS,
+      system,
+      tools,
       messages,
     });
     if (response.stop_reason === 'refusal') throw new Error('The AI declined this one. Try describing it differently, or search instead.');
@@ -200,16 +212,14 @@ export async function converse({ messages = [], text, context }, deps) {
     messages.push({ role: 'assistant', content: response.content });
 
     const calls = response.content.filter((b) => b.type === 'tool_use');
-    const ask = calls.find((c) => c.name === 'ask_user');
-    if (ask) return { type: 'question', question: ask.input.question, messages };
-    const log = calls.find((c) => c.name === 'log_foods');
-    if (log) return { type: 'proposal', items: await resolveItems(log.input.items, context.people, deps), messages };
+    const stop = calls.find((c) => stopTools.includes(c.name));
+    if (stop) return { call: stop, messages };
 
     if (!calls.length) {
-      // Plain text instead of a tool: treat it as a question if it asks one, otherwise nudge.
+      // Plain text instead of a tool: a question if it asks one, otherwise nudge it to finish.
       const said = response.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
-      if (said.endsWith('?')) return { type: 'question', question: said, messages };
-      messages.push({ role: 'user', content: 'Please finish by calling log_foods with every item.' });
+      if (allowQuestions && said.endsWith('?')) return { question: said, messages };
+      messages.push({ role: 'user', content: `Please finish by calling ${finish}.` });
       continue;
     }
 
@@ -224,6 +234,63 @@ export async function converse({ messages = [], text, context }, deps) {
     messages.push({ role: 'user', content: results });
   }
   throw new Error('The AI took too many steps. Try a simpler description, or search instead.');
+}
+
+// ---------- recipes ----------
+
+const RECIPE_SYSTEM = `You turn a recipe into ingredients with amounts for a food tracker.
+
+- Call search_foods for every ingredient (several calls in one turn is fine). Prefer plain USDA ingredients ("Onions, raw", "Chicken, breast, boneless, skinless, raw"); use a brand only when the recipe names one. Prefer results marked "saved".
+- Use the recipe's amounts. Choose a unit from the result's servings list, or use "g" or "oz" (1 lb = 16 oz).
+- Leave out water, and salt, pepper, herbs and spices under a tablespoon.
+- Servings: as the recipe states; if it doesn't, estimate a sensible number.
+- If an ingredient can't be found after two searches, list it in skipped.
+- Finish by calling save_recipe once. Don't ask questions or write other text.`;
+
+const RECIPE_TOOLS = [
+  TOOLS[0], // search_foods
+  {
+    name: 'save_recipe',
+    description: 'The finished recipe. The person reviews it before saving.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        servings: { type: 'number' },
+        ingredients: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              ref: { type: 'string', description: 'The ref of the chosen search result' },
+              amount: { type: 'number' },
+              unit: { type: 'string', description: 'One of the result\'s serving labels exactly, or "g" or "oz"' },
+            },
+            required: ['ref', 'amount', 'unit'],
+            additionalProperties: false,
+          },
+        },
+        skipped: { type: 'array', items: { type: 'string' }, description: 'Ingredients that could not be found' },
+      },
+      required: ['name', 'servings', 'ingredients', 'skipped'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+];
+
+// Reads a pasted recipe. Returns { name, servings, ingredients: [{ food, amount, unit, grams }], skipped }.
+export async function parseRecipe({ text }, deps) {
+  const messages = [{ role: 'user', content: `The recipe:\n\n${text}` }];
+  const { call } = await runTools({
+    system: RECIPE_SYSTEM, tools: RECIPE_TOOLS, messages, deps, stopTools: ['save_recipe'], finish: 'save_recipe', allowQuestions: false,
+  });
+  const { name, servings, ingredients, skipped } = call.input;
+  const resolved = await Promise.all(ingredients.map(async (it) => {
+    const food = await resolveFood(it.ref, deps);
+    return { food, ...amountFor(food, it.amount, it.unit) };
+  }));
+  return { name, servings: servings > 0 ? servings : 1, ingredients: resolved, skipped };
 }
 
 // ---------- nutrition label photos ----------

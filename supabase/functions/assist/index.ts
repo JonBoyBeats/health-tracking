@@ -1,7 +1,7 @@
-// Supabase Edge Function "assist": AI logging (Claude Haiku 5.5) and nutrition label photos.
+// Supabase Edge Function "assist": AI logging (Claude Haiku 5.5), pasted recipes and nutrition label photos.
 // The logic lives in lib.js; this file adds sign-in checking, CORS, the API keys and saved-food lookups.
 import Anthropic from 'npm:@anthropic-ai/sdk@1.3.0';
-import { converse, readLabel } from './lib.js';
+import { converse, readLabel, parseRecipe } from './lib.js';
 import { CORS, json, signedIn } from '../_shared/http.ts';
 
 const client = new Anthropic({ apiKey: Deno.env.get('ANTHROPIC_API_KEY') });
@@ -33,6 +33,9 @@ Deno.serve(async (req) => {
     const deps = { client, foodOpts: { usdaKey: Deno.env.get('USDA_API_KEY') }, ...savedFoods(req) };
     if (body.action === 'chat' && body.text && body.context) {
       return json(200, await converse({ messages: body.messages, text: String(body.text).slice(0, 1000), context: body.context }, deps));
+    }
+    if (body.action === 'recipe' && body.text) {
+      return json(200, await parseRecipe({ text: String(body.text).slice(0, 8000) }, deps));
     }
     if (body.action === 'label' && body.image) {
       return json(200, { result: await readLabel({ image: body.image, mediaType: body.mediaType, barcode: body.barcode }, deps) });

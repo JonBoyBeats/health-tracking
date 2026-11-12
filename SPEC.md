@@ -3,7 +3,7 @@
 A macro and weight tracker for two people (Jon and his wife), used on two iPhones
 (one in Safari, one in Chrome). Lives at `jonboybeats.github.io/health-tracking`.
 
-**Status: draft for approval. Nothing is built yet.**
+**Status: v1 built (steps 1–4).**
 
 ## v1 is done when
 
