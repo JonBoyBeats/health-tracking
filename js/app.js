@@ -162,7 +162,7 @@ function render() {
     const cals = items.reduce((s, e) => s + Number(e.calories), 0);
     return `
       <section class="meal">
-        <h3>${m.label}<span class="muted">${items.length ? `${round(cals)} cal` : ''}</span></h3>
+        <h3>${m.label}<span class="meal-tools">${items.length >= 2 ? `<button type="button" class="link" data-recipe-meal="${m.key}">Make recipe</button>` : ''}<span class="muted">${items.length ? `${round(cals)} cal` : ''}</span></span></h3>
         ${items.length ? items.map(entryRow).join('') : '<p class="empty">Nothing yet</p>'}
       </section>`;
   }).join('');
@@ -224,10 +224,11 @@ function foodTitle(f) {
   return f.brand && !f.name.toLowerCase().includes(f.brand.toLowerCase()) ? `${f.name} (${f.brand})` : f.name;
 }
 
-function badges(f) {
+// hideSaved: in the Recent list every food is saved, so the tag would only add clutter.
+function badges(f, hideSaved = false) {
   const out = [];
   if (f.source === 'recipe') out.push('<span class="badge">Recipe</span>');
-  else if (f.saved) out.push('<span class="badge">Saved</span>');
+  else if (f.saved) { if (!hideSaved) out.push('<span class="badge">Saved</span>'); }
   else out.push(`<span class="badge">${{ off: 'Open Food Facts', label: 'From label photo' }[f.source] || 'USDA'}</span>`);
   if (f.checks.sources_agree === true) out.push('<span class="badge good">✓ 2 sources agree</span>');
   if (f.checks.sources_agree === false) out.push('<span class="badge warn">Sources differ</span>');
@@ -243,16 +244,22 @@ function resultRow(f, i) {
     <button class="entry" data-result="${i}">
       <span class="desc">${esc(f.name)}
         <span class="macros">${f.brand ? `${esc(f.brand)} · ` : ''}${esc(s ? s.label : '100 g')}</span>
-        <span>${badges(f)}</span></span>
+        ${(() => { const b = badges(f, $('results-heading').textContent === 'Recent'); return b ? `<span>${b}</span>` : ''; })()}</span>
       <span class="kcal">${cals}</span>
     </button>`;
 }
 
-function renderResults(heading, note = '') {
-  $('results-heading').textContent = heading;
+const RECENT_SHOWN = 5;
+
+// `limit`: show only that many results, with a "Show more" button for the rest.
+function renderResults(heading, note = '', limit = Infinity) {
+  $('results-heading').textContent = heading; // set first: result rows read it
   $('results-heading').hidden = !heading;
   $('results-note').textContent = note;
-  $('results').innerHTML = state.results.map(resultRow).join('');
+  $('results').innerHTML = state.results.slice(0, limit).map(resultRow).join('');
+  const more = state.results.length - Math.min(limit, state.results.length);
+  $('results-more').hidden = more <= 0;
+  $('results-more').textContent = `Show ${more} more`;
 }
 
 // ---------- add sheet: recent foods, search, barcode ----------
@@ -268,9 +275,10 @@ async function openAdd(forRecipe = false) {
   await showRecent();
 }
 
-async function showRecent() {
+async function showRecent(all = false) {
   state.results = (await db.recentFoods()).map(fromSaved);
-  renderResults(state.results.length ? 'Recent' : '', state.results.length ? '' : 'Search for a food or scan a barcode.');
+  renderResults(state.results.length ? 'Recent' : '', state.results.length ? '' : 'Search for a food or scan a barcode.',
+    all ? Infinity : RECENT_SHOWN);
 }
 
 let searchToken = 0;
@@ -425,6 +433,7 @@ function confirmRow(it, i) {
 }
 
 function updateConfirmTotals() {
+  $('confirm-recipe').hidden = !state.proposal.length || new Set(state.proposal.map((it) => it.person_id)).size !== 1;
   state.proposal.forEach((it, i) => {
     const n = itemNutrients(it);
     const el = document.querySelector(`[data-item-macros="${i}"]`);
@@ -545,9 +554,37 @@ function newRecipe() {
 
 function editRecipe(food) {
   const ingredients = (food.ingredients || []).map((i) => ({ ...i }));
-  const total = ingredients.reduce((g, i) => g + Number(i.grams), 0);
-  const serving = food.servings[0]?.grams || total;
-  state.recipe = { id: food.id, name: food.name, servings: round1(total / serving) || 1, ingredients };
+  // Servings = whole recipe / one serving (both are stored as sizes on the recipe).
+  const [serving, whole] = food.servings;
+  state.recipe = { id: food.id, name: food.name, servings: round1(whole?.grams / serving?.grams) || 1, ingredients };
+  showRecipe();
+}
+
+// A meal already in the log, as a recipe. Saving can swap those entries for 1 serving of it.
+function recipeFromMeal(meal) {
+  const entries = state.entries.filter((e) => e.person_id === state.personId && e.meal === meal);
+  const ingredients = entries.map((e) => {
+    const it = { entry_id: e.id, food_id: e.food_id || null, name: e.description, amount: Number(e.amount) || 1, unit: e.unit || 'serving', grams: e.grams != null ? Number(e.grams) : null };
+    for (const k of NKEYS) it[k] = Number(e[k]) || 0;
+    return it;
+  });
+  state.recipe = { id: null, name: '', servings: 1, ingredients, logAfter: { mode: 'replace', people: [state.personId], meal } };
+  showRecipe();
+}
+
+// The AI's proposal (one person's items), as a recipe. Saving logs 1 serving instead of the items.
+function recipeFromProposal() {
+  const ingredients = state.proposal.map((it) => {
+    if (it.food) {
+      const unit = unitsFor(it.food)[it.unitIndex];
+      return ingredient(it.food, Number(it.amount) || 0, unit.label, (Number(it.amount) || 0) * unit.grams);
+    }
+    const est = { food_id: null, name: it.name, amount: Number(it.amount) || 1, unit: it.unit, grams: null };
+    for (const k of NKEYS) est[k] = Number(it.estimate[k]) || 0;
+    return est;
+  });
+  const meal = $('confirm-form').meal.value;
+  state.recipe = { id: null, name: '', servings: 1, ingredients, logAfter: { mode: 'confirm', people: [state.proposal[0].person_id], meal } };
   showRecipe();
 }
 
@@ -558,6 +595,18 @@ function showRecipe() {
   f.servings.value = state.recipe.servings;
   $('recipe-title').textContent = state.recipe.id ? 'Edit recipe' : 'New recipe';
   $('recipe-delete').hidden = !state.recipe.id;
+  const after = state.recipe.logAfter;
+  $('recipe-log-field').hidden = !after;
+  $('recipe-from-hint').hidden = !after;
+  if (after) {
+    const meal = MEALS.find((m) => m.key === after.meal).label.toLowerCase();
+    const who = profile(after.people[0]).name;
+    $('recipe-log').checked = true;
+    $('recipe-log').disabled = after.mode === 'confirm';
+    $('recipe-log-text').textContent = after.mode === 'replace'
+      ? `Replace these items in ${who}'s ${meal} with 1 serving of the recipe`
+      : `Log 1 serving for ${who} (${meal}) instead of the separate items`;
+  }
   renderRecipe();
   openSheet('recipe');
 }
@@ -585,11 +634,15 @@ function updateRecipeTotals() {
   });
   const t = recipeTotals();
   const servings = Number($('recipe-form').servings.value) || 0;
-  $('recipe-totals').innerHTML = t.grams > 0 && servings > 0 ? `
-    <span class="big">${round(t.calories / servings)}</span> <span class="muted">cal per serving · ${round(t.grams / servings)} g</span>
+  const weighed = gramsKnown();
+  $('recipe-totals').innerHTML = t.calories > 0 && servings > 0 ? `
+    <span class="big">${round(t.calories / servings)}</span> <span class="muted">cal per serving${weighed ? ` · ${round(t.grams / servings)} g` : ''}</span>
     <div class="macros">P ${round(t.protein / servings)} · C ${round(t.carbs / servings)} · F ${round(t.fat / servings)} · Fiber ${round(t.fiber / servings)}</div>
-    <div class="macros">Whole recipe: ${round(t.calories)} cal, ${round(t.grams)} g</div>` : '<span class="muted">Add ingredients and the number of servings.</span>';
+    <div class="macros">Whole recipe: ${round(t.calories)} cal${weighed ? `, ${round(t.grams)} g` : ''}</div>` : '<span class="muted">Add ingredients and the number of servings.</span>';
 }
+
+// Quick adds and estimates have no weight; a recipe with any of them is logged by the serving only.
+const gramsKnown = () => state.recipe.ingredients.every((it) => Number(it.grams) > 0);
 
 async function saveRecipe() {
   const f = $('recipe-form');
@@ -599,30 +652,50 @@ async function saveRecipe() {
   const t = recipeTotals();
   if (!r.name) return toast('Give the recipe a name');
   if (!(r.servings > 0)) return toast('Enter the number of servings');
-  if (!(t.grams > 0)) return toast('Add at least one ingredient');
+  if (!r.ingredients.length || !(t.calories > 0)) return toast('Add at least one ingredient');
 
   // Ingredients picked from search or the AI join the saved food list too.
   for (const it of r.ingredients) {
     if (!it.food_id && it.food) it.food_id = (await db.saveFood(toRow(it.food))).id;
   }
   const ingredients = r.ingredients.map((it) => {
-    const row = { food_id: it.food_id || null, name: it.name, amount: round1(it.amount), unit: it.unit, grams: round1(it.grams) };
+    const row = { food_id: it.food_id || null, name: it.name, amount: round1(it.amount), unit: it.unit, grams: Number(it.grams) > 0 ? round1(it.grams) : null };
     for (const k of NKEYS) row[k] = round1(it[k]);
     return row;
   });
-  const serving = t.grams / r.servings;
-  await db.saveFood(toRow({
+  // Without every ingredient's weight, a serving counts as 100 "g" so per-100 g math still works;
+  // the sizes then say just "1 serving" and "whole recipe".
+  const weighed = gramsKnown();
+  const total = weighed ? t.grams : 100 * r.servings;
+  const serving = total / r.servings;
+  const servings = [
+    { label: weighed ? `1 serving (${round(serving)} g)` : '1 serving', grams: round1(serving) },
+    { label: weighed ? `whole recipe (${round(total)} g)` : 'whole recipe', grams: round1(total) },
+  ];
+  const per100 = Object.fromEntries(NKEYS.map((k) => [k, (t[k] * 100) / total]));
+  const saved = await db.saveFood(toRow({
     id: r.id, name: r.name, brand: null, barcode: null, source: 'recipe', source_id: null,
-    per100: Object.fromEntries(NKEYS.map((k) => [k, round1((t[k] * 100) / t.grams)])),
-    servings: [
-      { label: `1 serving (${round(serving)} g)`, grams: round1(serving) },
-      { label: `whole recipe (${round(t.grams)} g)`, grams: round1(t.grams) },
-    ],
-    is_estimate: false, ingredients,
+    per100: Object.fromEntries(NKEYS.map((k) => [k, round1(per100[k])])), servings, is_estimate: false, ingredients,
   }));
+
+  const after = r.logAfter;
   state.recipe = null;
-  toast('Recipe saved');
-  await openAdd();
+  state.recipeMode = false;
+  if (!after || !$('recipe-log').checked) {
+    toast('Recipe saved');
+    return openAdd();
+  }
+  // Log 1 serving; when made from the log, the separate items it replaces go.
+  const entry = { description: r.name, meal: after.meal, food_id: saved.id, amount: 1, unit: servings[0].label, grams: weighed ? round1(serving) : null, is_estimate: false };
+  for (const k of NKEYS) entry[k] = round1(t[k] / r.servings);
+  if (after.mode === 'replace') {
+    for (const it of r.ingredients) if (it.entry_id) await db.deleteEntry(it.entry_id);
+  }
+  await db.addEntries(after.people.map((id) => ({ ...entry, person_id: id, eaten_on: state.day })));
+  state.proposal = [];
+  for (const d of document.querySelectorAll('dialog[open]')) d.close();
+  await loadDay();
+  toast(`Recipe saved · ${after.people.map(leftText).join(' · ')}`);
 }
 
 async function fillRecipeWithAi() {
@@ -1132,10 +1205,18 @@ $('recipe-form').servings.addEventListener('input', updateRecipeTotals);
 $('recipe-ai').addEventListener('click', fillRecipeWithAi);
 $('recipe-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveRecipe().catch(fail); });
 $('recipe-cancel').addEventListener('click', () => {
+  const backToConfirm = state.recipe?.logAfter?.mode === 'confirm';
   state.recipeMode = false;
   state.recipe = null;
-  $('recipe').close();
+  if (backToConfirm) openSheet('confirm');
+  else $('recipe').close();
 });
+$('meals').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-recipe-meal]');
+  if (b) { ev.stopPropagation(); recipeFromMeal(b.dataset.recipeMeal); }
+});
+$('confirm-recipe').addEventListener('click', recipeFromProposal);
+$('results-more').addEventListener('click', () => showRecent(true).catch(fail));
 $('recipe-delete').addEventListener('click', async () => {
   if (!confirm(`Delete the recipe "${state.recipe.name}"? Days it was logged on keep their numbers.`)) return;
   try {

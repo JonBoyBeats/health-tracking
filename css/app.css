@@ -132,6 +132,12 @@ textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .top-actions button:not(.icon) { padding: 6px 12px; font-size: 14px; }
 
 /* Recipes */
+.meal-tools { display: inline-flex; align-items: baseline; gap: 10px; }
+.meal-tools .link { font-size: 12px; text-transform: none; letter-spacing: 0; }
+.more { align-self: flex-start; }
+label.check { flex-direction: row; align-items: center; gap: 10px; font-size: 14px; color: var(--ink); }
+label.check input { width: 20px; height: 20px; flex: none; accent-color: var(--accent); }
+#confirm-recipe { align-self: flex-start; padding: 0; }
 details summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 14px; }
 details[open] summary { margin-bottom: 8px; }
 #recipe-items .citem .row { align-items: center; }
@@ -159,6 +165,8 @@ dialog {
   background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 14px; padding: 16px;
 }
 dialog::backdrop { background: rgba(0, 0, 0, .6); }
+/* Sheets focus their wrapper on open, not the first field, so the keyboard doesn't jump up. */
+dialog [tabindex="-1"]:focus { outline: none; }
 
 .toast {
   inset: auto; margin: 0; border: 0;

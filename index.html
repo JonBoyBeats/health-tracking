@@ -56,7 +56,7 @@
 </main>
 
 <dialog id="add">
-  <div class="stack">
+  <div class="stack" tabindex="-1" autofocus>
     <h2 id="add-title" hidden>Add an ingredient</h2>
     <form id="ai-form" class="stack">
       <div id="ai-chat" class="chat" hidden></div>
@@ -77,6 +77,7 @@
     <h3 id="results-heading" class="list-heading" hidden></h3>
     <p id="results-note" class="hint"></p>
     <div id="results"></div>
+    <button id="results-more" type="button" class="link more" hidden></button>
     <div class="actions">
       <button id="open-quick" type="button" class="link">Quick add</button>
       <label id="label-link" class="link filelink">Snap a label
@@ -90,7 +91,7 @@
 </dialog>
 
 <dialog id="scanner">
-  <div class="stack">
+  <div class="stack" tabindex="-1" autofocus>
     <h2>Scan a barcode</h2>
     <video id="scan-video" playsinline muted autoplay></video>
     <p id="scan-status" class="hint"></p>
@@ -106,7 +107,7 @@
 </dialog>
 
 <dialog id="food">
-  <form id="food-form" class="stack">
+  <form id="food-form" class="stack" tabindex="-1" autofocus>
     <div>
       <h2 id="food-name"></h2>
       <div id="food-badges"></div>
@@ -140,7 +141,7 @@
 </dialog>
 
 <dialog id="confirm">
-  <form id="confirm-form" class="stack">
+  <form id="confirm-form" class="stack" tabindex="-1" autofocus>
     <h2>Check and save</h2>
     <div id="confirm-items"></div>
     <label>Meal
@@ -152,6 +153,7 @@
       </select>
     </label>
     <p id="confirm-after" class="hint"></p>
+    <button id="confirm-recipe" type="button" class="link" hidden>Make these a recipe (like a dish you made in a batch)</button>
     <div class="actions">
       <button id="confirm-back" type="button">Back</button>
       <span class="spacer"></span>
@@ -161,12 +163,13 @@
 </dialog>
 
 <dialog id="recipe">
-  <form id="recipe-form" class="stack">
+  <form id="recipe-form" class="stack" tabindex="-1" autofocus>
     <h2 id="recipe-title">New recipe</h2>
     <div class="row">
       <label class="grow">Name <input name="name" autocomplete="off" required></label>
       <label class="amount">Servings <input name="servings" inputmode="decimal" required></label>
     </div>
+    <p id="recipe-from-hint" class="hint" hidden>The amounts below are what was logged, so they make 1 serving. Change the servings if they were for the whole batch.</p>
     <details id="recipe-paste">
       <summary>Paste a recipe and let the AI fill this in</summary>
       <div class="stack">
@@ -182,6 +185,7 @@
     <div id="recipe-items"></div>
     <button id="recipe-add" type="button">+ Add ingredient</button>
     <div id="recipe-totals" class="card"></div>
+    <label id="recipe-log-field" class="check" hidden><input id="recipe-log" type="checkbox"> <span id="recipe-log-text"></span></label>
     <div class="actions">
       <button id="recipe-delete" type="button" class="danger" hidden>Delete</button>
       <span class="spacer"></span>
@@ -192,7 +196,7 @@
 </dialog>
 
 <dialog id="weight">
-  <div class="stack">
+  <div class="stack" tabindex="-1" autofocus>
     <h2>Weight · <span id="weight-person"></span></h2>
     <div id="weight-hero"></div>
     <form id="weight-form" class="row">
@@ -207,7 +211,7 @@
 </dialog>
 
 <dialog id="entry">
-  <form id="entry-form" class="stack" method="dialog">
+  <form id="entry-form" class="stack" method="dialog" tabindex="-1" autofocus>
     <h2 id="entry-title">Quick add</h2>
     <label>What did you eat? <input name="description" required autocomplete="off" placeholder="e.g. Turkey sandwich"></label>
     <div class="grid5">
@@ -240,7 +244,7 @@
 </dialog>
 
 <dialog id="settings">
-  <form id="settings-form" class="stack" method="dialog">
+  <form id="settings-form" class="stack" method="dialog" tabindex="-1" autofocus>
     <h2>Daily targets</h2>
     <div id="targets"></div>
     <p class="hint">Signed in as <span id="signed-in-as"></span></p>
