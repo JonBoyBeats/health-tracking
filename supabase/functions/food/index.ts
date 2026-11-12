@@ -1,23 +1,7 @@
 // Supabase Edge Function "food": food search, barcode lookup and USDA details.
 // The lookup logic lives in lib.js; this file adds sign-in checking, CORS and the USDA key.
 import { searchFoods, lookupBarcode, usdaFood } from './lib.js';
-
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-};
-const json = (status: number, data: unknown) =>
-  new Response(JSON.stringify(data), { status, headers: { ...CORS, 'Content-Type': 'application/json' } });
-
-// Only our two signed-in users may use the function (it spends our USDA quota).
-async function signedIn(req: Request) {
-  const auth = req.headers.get('Authorization') || '';
-  const apikey = req.headers.get('apikey') || '';
-  if (!auth.startsWith('Bearer ') || !apikey) return false;
-  const res = await fetch(`${Deno.env.get('SUPABASE_URL')}/auth/v1/user`, { headers: { Authorization: auth, apikey } });
-  return res.ok;
-}
+import { CORS, json, signedIn } from '../_shared/http.ts';
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });

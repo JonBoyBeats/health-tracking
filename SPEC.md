@@ -42,7 +42,7 @@ A macro and weight tracker for two people (Jon and his wife), used on two iPhone
 - **Postgres database** with row-level security. Only signed-in users can read or write, and the
   only users are us two, so both of us can see and log everything.
 - **Edge Functions** (server code) hold every secret key, so no key is ever in the repo or the page:
-  - `assist`: the AI logging conversation (Claude Opus 5.5)
+  - `assist`: the AI logging conversation and label photos (Claude Haiku 5.5)
   - `food-search`: searches every food source at once and returns ranked results
   - `barcode`: looks up a barcode
 - The Supabase project URL and public "anon" key do go in the page. That is by design and is safe
@@ -77,7 +77,7 @@ A macro and weight tracker for two people (Jon and his wife), used on two iPhone
 
 ## AI logging flow (`assist`)
 
-1. The user's sentence (plus who and which meal) goes to Claude Opus 5.5.
+1. The user's sentence (plus who and which meal) goes to Claude Haiku 5.5.
 2. Claude splits it into items and amounts. It asks a follow-up question only when the answer
    changes the numbers meaningfully (at most one or two questions). For "Both", it asks whether
    amounts were the same for each person.
@@ -158,5 +158,6 @@ Keys are pasted into Supabase's secret settings, never into chat or the repo.
   Supabase Edge Functions. If so, FatSecret is dropped or reached another way.
 - **Barcode scanning in the home screen app:** camera access from a home screen app on iPhone is
   tested in step 2. If it isn't reliable, scanning opens in the browser instead.
-- **AI cost:** Opus 5.5 is roughly 1–3¢ per logged meal (label photos cost a little more). The
-  spending limit caps it.
+- **AI cost:** Haiku 5.5 is a fraction of a cent per logged meal, likely under $1/month for two
+  people. Switching to Opus 5.5 (about 2–5¢ per meal) is a one-line change in
+  `supabase/functions/assist/lib.js`. The spending limit caps either.

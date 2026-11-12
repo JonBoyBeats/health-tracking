@@ -21,6 +21,9 @@ const state = {
   food: null,      // the food open in the amount sheet
   results: [],     // foods listed in the add sheet
   reader: null,    // the barcode scanner while the camera is on
+  lastBarcode: null, // a barcode no source had, attached to a label photo taken next
+  ai: [],          // the AI conversation so far (sent back with each answer)
+  proposal: [],    // items the AI proposed, shown in the confirm sheet
 };
 const $ = (id) => document.getElementById(id);
 
@@ -215,7 +218,7 @@ function foodTitle(f) {
 function badges(f) {
   const out = [];
   if (f.saved) out.push('<span class="badge">Saved</span>');
-  else out.push(`<span class="badge">${f.source === 'off' ? 'Open Food Facts' : 'USDA'}</span>`);
+  else out.push(`<span class="badge">${{ off: 'Open Food Facts', label: 'From label photo' }[f.source] || 'USDA'}</span>`);
   if (f.checks.sources_agree === true) out.push('<span class="badge good">✓ 2 sources agree</span>');
   if (f.checks.sources_agree === false) out.push('<span class="badge warn">Sources differ</span>');
   if (f.checks.calories_match === false) out.push('<span class="badge warn">Calories don\'t add up</span>');
@@ -246,6 +249,7 @@ function renderResults(heading, note = '') {
 
 async function openAdd() {
   state.editing = null;
+  state.lastBarcode = null;
   $('food-q').value = '';
   openSheet('add');
   await showRecent();
@@ -291,12 +295,202 @@ async function lookupBarcode(code) {
     const { results } = await db.lookup({ action: 'barcode', code });
     if (results.length === 1) return openFood(results[0]);
     state.results = results;
+    state.lastBarcode = results.length ? null : code;
     renderResults(
       results.length ? `Barcode ${code}` : '',
       results.length
         ? 'The two sources list different numbers for this product. Compare with the label and pick the one that matches.'
-        : `Barcode ${code} isn't in USDA or Open Food Facts. Search by name, or use Quick add with the numbers from the label.`,
+        : `Barcode ${code} isn't in USDA or Open Food Facts. Tap "Snap a label" to read the nutrition label, or search by name.`,
     );
+  } catch (err) {
+    renderResults('', err.message);
+  }
+}
+
+// ---------- AI logging ----------
+
+function renderChat(lines) {
+  $('ai-chat').innerHTML = lines.map((l) => `<p class="bubble ${l.who}">${esc(l.text)}</p>`).join('');
+  $('ai-chat').hidden = !lines.length;
+}
+
+let chatLines = [];
+
+function resetAi() {
+  state.ai = [];
+  chatLines = [];
+  renderChat(chatLines);
+  $('ai-text').value = '';
+  $('ai-text').placeholder = 'What did you eat? e.g. 2 eggs and toast with butter';
+  $('ai-send').textContent = 'Log it';
+  $('ai-reset').hidden = true;
+  $('ai-status').textContent = '';
+}
+
+async function sendAi() {
+  const text = $('ai-text').value.trim();
+  if (!text || $('ai-send').disabled) return;
+  chatLines.push({ who: 'me', text });
+  renderChat(chatLines);
+  $('ai-text').value = '';
+  $('ai-send').disabled = true;
+  $('ai-status').textContent = 'Working it out…';
+  try {
+    const res = await db.assist({
+      action: 'chat', text, messages: state.ai,
+      context: { people: state.profiles.map((p) => ({ id: p.id, name: p.name || 'Unnamed' })), me: state.user.id, forPerson: state.personId, meal: mealForNow() },
+    });
+    $('ai-status').textContent = '';
+    if (res.type === 'question') {
+      state.ai = res.messages;
+      chatLines.push({ who: 'ai', text: res.question });
+      renderChat(chatLines);
+      $('ai-text').placeholder = 'Your answer';
+      $('ai-send').textContent = 'Answer';
+      $('ai-reset').hidden = false;
+      $('ai-text').focus();
+    } else {
+      resetAi();
+      openConfirm(res.items);
+    }
+  } catch (err) {
+    chatLines.pop(); // let them send it again
+    renderChat(chatLines);
+    $('ai-text').value = text;
+    $('ai-status').textContent = err.message;
+  } finally {
+    $('ai-send').disabled = false;
+  }
+}
+
+// ---------- confirm sheet (AI proposals) ----------
+
+function openConfirm(items) {
+  state.proposal = items.map((it) => {
+    if (!it.food) return { ...it };
+    const units = unitsFor(it.food);
+    const unitIndex = Math.max(0, units.findIndex((u) => u.label === it.unit));
+    return { ...it, unitIndex, amount: it.amount };
+  });
+  $('confirm-form').meal.value = mealForNow();
+  renderConfirm();
+  openSheet('confirm');
+}
+
+function itemNutrients(it) {
+  if (!it.food) return it.estimate;
+  const unit = unitsFor(it.food)[it.unitIndex];
+  return nutrientsFor(it.food, (Number(it.amount) || 0) * unit.grams);
+}
+
+function renderConfirm() {
+  const groups = state.profiles.filter((p) => state.proposal.some((it) => it.person_id === p.id));
+  $('confirm-items').innerHTML = groups.map((p) => `
+    <h3 class="list-heading">${esc(p.name)}</h3>
+    ${state.proposal.map((it, i) => (it.person_id === p.id ? confirmRow(it, i) : '')).join('')}`).join('')
+    || '<p class="hint">Nothing left to save.</p>';
+  updateConfirmTotals();
+}
+
+function confirmRow(it, i) {
+  const title = it.food ? foodTitle(it.food) : it.name;
+  const amount = it.food
+    ? `<div class="row">
+        <input class="amount-in" data-amount="${i}" inputmode="decimal" value="${round1(it.amount)}" aria-label="Amount">
+        <select class="grow" data-unit="${i}" aria-label="Unit">${unitsFor(it.food).map((u, j) => `<option value="${j}" ${j === it.unitIndex ? 'selected' : ''}>${esc(u.label)}</option>`).join('')}</select>
+      </div>`
+    : `<div class="macros">${esc(`${round1(it.amount)} × ${it.unit}`)}</div>`;
+  return `
+    <div class="citem">
+      <div class="citem-head">
+        <span class="desc">${esc(title)} <span>${it.food ? badges(it.food) : '<span class="badge warn">Estimate</span>'}</span></span>
+        <button type="button" class="icon" data-remove="${i}" aria-label="Remove ${esc(title)}">×</button>
+      </div>
+      ${amount}
+      <div class="macros" data-item-macros="${i}"></div>
+    </div>`;
+}
+
+function updateConfirmTotals() {
+  state.proposal.forEach((it, i) => {
+    const n = itemNutrients(it);
+    const el = document.querySelector(`[data-item-macros="${i}"]`);
+    if (el) el.textContent = `${round(n.calories)} cal · P ${round(n.protein)} · C ${round(n.carbs)} · F ${round(n.fat)} · Fiber ${round(n.fiber)}`;
+  });
+  const people = [...new Set(state.proposal.map((it) => it.person_id))];
+  $('confirm-after').textContent = people.length ? 'After this: ' + people.map((id) => {
+    const p = profile(id);
+    const t = totals(id);
+    const add = state.proposal.filter((it) => it.person_id === id).map(itemNutrients)
+      .reduce((a, n) => ({ calories: a.calories + n.calories, protein: a.protein + n.protein }), { calories: 0, protein: 0 });
+    const cal = round(p.target_calories - t.calories - add.calories);
+    const pro = round(p.target_protein - t.protein - add.protein);
+    return `${p.name} ${cal < 0 ? `${-cal} cal over` : `${cal} cal left`}, ${pro < 0 ? `${-pro}g protein over` : `${pro}g protein left`}`;
+  }).join(' · ') : '';
+}
+
+async function saveProposal() {
+  if (!state.proposal.length) return $('confirm').close();
+  const meal = $('confirm-form').meal.value;
+  const saved = new Map(); // one row per food, even when both people ate it
+  const rows = [];
+  for (const it of state.proposal) {
+    const n = itemNutrients(it);
+    const row = { person_id: it.person_id, eaten_on: state.day, meal, amount: round1(it.amount) };
+    for (const k in n) row[k] = round1(n[k]);
+    if (it.food) {
+      const key = it.food.id || `${it.food.source}:${it.food.source_id}`;
+      if (!saved.has(key)) saved.set(key, await db.saveFood(toRow(it.food)));
+      const unit = unitsFor(it.food)[it.unitIndex];
+      Object.assign(row, {
+        description: foodTitle(it.food), food_id: saved.get(key).id, unit: unit.label,
+        grams: round1((Number(it.amount) || 0) * unit.grams), is_estimate: Boolean(it.food.is_estimate),
+      });
+    } else {
+      Object.assign(row, { description: it.name, unit: it.unit, is_estimate: true });
+    }
+    rows.push(row);
+  }
+  await db.addEntries(rows);
+  const people = [...new Set(rows.map((r) => r.person_id))];
+  state.proposal = [];
+  $('confirm').close();
+  await loadDay();
+  toast(people.map(leftText).join(' · '));
+}
+
+// ---------- nutrition label photos ----------
+
+// Shrinks a photo to a JPEG of at most `max` pixels on its long side, as base64.
+async function photoToJpeg(file, max = 1600) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error('Couldn\'t open that photo'));
+      i.src = url;
+    });
+    const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * scale);
+    c.height = Math.round(img.naturalHeight * scale);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.85).split(',')[1];
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function readLabelPhoto(file) {
+  state.results = [];
+  renderResults('', 'Reading the label…');
+  try {
+    const image = await photoToJpeg(file);
+    const { result } = await db.assist({ action: 'label', image, mediaType: 'image/jpeg', barcode: state.lastBarcode });
+    if (!result.name) result.name = (prompt('What is this product called?') || '').trim() || 'Food from label';
+    renderResults('', '');
+    await openFood(result);
   } catch (err) {
     renderResults('', err.message);
   }
@@ -619,6 +813,36 @@ $('results').addEventListener('click', (ev) => {
 });
 $('open-scanner').addEventListener('click', () => openScanner());
 $('open-quick').addEventListener('click', () => openEntry(null, $('food-q').value.trim()));
+
+// AI logging
+$('ai-form').addEventListener('submit', (ev) => { ev.preventDefault(); sendAi(); });
+$('ai-text').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); sendAi(); }
+});
+$('ai-reset').addEventListener('click', resetAi);
+
+// Label photo
+$('label-photo').addEventListener('change', (ev) => {
+  if (ev.target.files[0]) readLabelPhoto(ev.target.files[0]);
+  ev.target.value = '';
+});
+
+// Confirm sheet
+$('confirm-items').addEventListener('input', (ev) => {
+  const i = ev.target.dataset.amount ?? ev.target.dataset.unit;
+  if (i == null) return;
+  if (ev.target.dataset.amount != null) state.proposal[i].amount = ev.target.value;
+  else state.proposal[i].unitIndex = Number(ev.target.value);
+  updateConfirmTotals();
+});
+$('confirm-items').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-remove]');
+  if (!b) return;
+  state.proposal.splice(Number(b.dataset.remove), 1);
+  renderConfirm();
+});
+$('confirm-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveProposal().catch(fail); });
+$('confirm-back').addEventListener('click', () => openSheet('add'));
 
 // Scanner
 $('scanner').addEventListener('close', stopScanner);

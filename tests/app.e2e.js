@@ -26,7 +26,9 @@ let entries = [];
 let foods = [];
 const requests = [];
 let nextId = 1;
-let lib;
+let lib, assistLib;
+let aiScript = []; // scripted Claude replies for the AI logging test (functions/v1/assist)
+const fakeClaude = { messages: { create: async (req) => ({ content: aiScript.shift()(req), stop_reason: 'tool_use' }) } };
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
 function session(email) {
@@ -84,6 +86,20 @@ async function fakeSupabase(route) {
     }
     return json(400, { error: 'Unknown request' });
   }
+  if (url.pathname === '/functions/v1/assist') {
+    const deps = {
+      client: fakeClaude,
+      foodOpts: { usdaKey: process.env.USDA_API_KEY },
+      searchSaved: async (q) => foods.filter((f) => q.toLowerCase().split(/\s+/).every((w) => `${f.name} ${f.brand || ''}`.toLowerCase().includes(w))),
+      getSaved: async (id) => foods.find((f) => f.id === id),
+    };
+    try {
+      if (body.action === 'chat') return json(200, await assistLib.converse(body, deps));
+      if (body.action === 'label') return json(200, { result: await assistLib.readLabel(body, deps) });
+    } catch (err) {
+      return json(502, { error: err.message });
+    }
+  }
   if (url.pathname === '/rest/v1/profiles') {
     if (method === 'GET') return json(200, profiles);
     if (method === 'PATCH') { Object.assign(profiles.find((p) => p.id === eq(url, 'id')), body); return route.fulfill({ status: 204 }); }
@@ -121,6 +137,7 @@ function localDay(d) {
 
 (async () => {
   lib = await import(path.join(__dirname, '../supabase/functions/food/lib.js'));
+  assistLib = await import(path.join(__dirname, '../supabase/functions/assist/lib.js'));
   const browser = await chromium.launch({
     args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
       `--use-file-for-fake-video-capture=${path.join(FIXTURES, 'noodles.y4m')}`],
@@ -143,7 +160,7 @@ function localDay(d) {
   const page = await context.newPage();
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   page.on('pageerror', (e) => errors.push(e.message));
-  page.on('dialog', (d) => d.accept());
+  page.on('dialog', (d) => d.accept(d.type() === 'prompt' ? 'Protein Granola' : undefined));
   const closed = (id) => page.waitForSelector(`#${id}:not([open])`, { state: 'attached' });
   const big = () => page.textContent('#left .big');
 
@@ -263,9 +280,13 @@ function localDay(d) {
   assert.equal(noodles.calories, Math.round(3.85 * 56.699 * 10) / 10);
   console.log('ok  camera scan: both sources agree, logged by the ounce');
 
+  // From here on there's no camera (the fake one would keep scanning the noodles).
+  await page.evaluate(() => { navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error('NotAllowedError')); });
+
   // ---- Scan from a photo (Chobani: only in Open Food Facts).
   await page.click('#open-add');
   await page.click('#open-scanner');
+  await page.waitForFunction(() => document.querySelector('#scan-status').textContent.includes("camera isn't available"));
   await page.setInputFiles('#scan-photo', path.join(FIXTURES, 'chobani.png'));
   await page.waitForSelector('#food[open]', { timeout: 30000 });
   assert.equal(await page.textContent('#food-name'), 'Greek Yogurt Strawberry (Chobani)');
@@ -297,6 +318,84 @@ function localDay(d) {
   assert.match(await page.textContent('#meals'), /2 oz · P 5/);
   await page.screenshot({ path: `${OUT}/step2-today.png` });
   console.log('ok  edit a food entry by amount');
+
+  // ---- AI logging: describe, answer a follow-up, review, adjust, save.
+  const use = (id, name, input) => ({ type: 'tool_use', id, name, input });
+  const zero = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
+  let eggs;
+  aiScript = [
+    (r) => {
+      assert.match(r.messages[0].content, /The app user is jon\. The other person is wife\./);
+      return [use('a1', 'search_foods', { query: 'scrambled eggs' })];
+    },
+    (r) => {
+      eggs = JSON.parse(r.messages.at(-1).content[0].content).find((f) => f.servings.some((x) => /large/.test(x)));
+      return [use('a2', 'ask_user', { question: 'Did you both have the same amount?' })];
+    },
+    (r) => {
+      assert.deepEqual(r.messages.at(-1).content, [{ type: 'tool_result', tool_use_id: 'a2', content: 'she had one, I had two' }]);
+      const large = eggs.servings.find((x) => /large/.test(x));
+      return [use('a3', 'log_foods', { items: [
+        { person: 'jon', ref: eggs.ref, name: 'Scrambled eggs', amount: 2, unit: large, estimate: zero },
+        { person: 'wife', ref: eggs.ref, name: 'Scrambled eggs', amount: 1, unit: large, estimate: zero },
+        { person: 'jon', ref: 'estimate', name: 'Coffee with cream', amount: 1, unit: '1 mug', estimate: { calories: 60, protein: 1, carbs: 2, fat: 5, fiber: 0 } },
+      ] })];
+    },
+  ];
+  await page.click('#open-add');
+  await page.fill('#ai-text', 'we had scrambled eggs and I had coffee with cream');
+  await page.click('#ai-send');
+  await page.waitForFunction(() => document.querySelector('#ai-chat .bubble.ai')?.textContent.includes('same amount'), null, { timeout: 30000 });
+  assert.equal(await page.textContent('#ai-send'), 'Answer');
+  await page.screenshot({ path: `${OUT}/step3-question.png` });
+  await page.fill('#ai-text', 'she had one, I had two');
+  await page.press('#ai-text', 'Enter');
+  await page.waitForSelector('#confirm[open]', { timeout: 30000 });
+  assert.match(await page.textContent('#confirm-items'), /jon.*Egg.*Estimate.*wife.*Egg/s);
+  await page.screenshot({ path: `${OUT}/step3-confirm.png` });
+  // Wife's eggs: 1 -> 2; remove the coffee.
+  assert.equal((await page.$$('#confirm-items [data-amount]')).length, 2);
+  await page.fill('#confirm-items [data-amount="1"]', '2');
+  const eggCal = await page.textContent('[data-item-macros="0"]');
+  assert.equal(await page.textContent('[data-item-macros="1"]'), eggCal, 'same amount, same numbers');
+  await page.click('[data-remove="2"]');
+  assert.doesNotMatch(await page.textContent('#confirm-items'), /Coffee/);
+  assert.match(await page.textContent('#confirm-after'), /jon .* cal left.*wife .* cal left/);
+  const before = { entries: entries.length, foods: foods.length };
+  await page.click('#confirm-form button[type=submit]');
+  await closed('confirm');
+  const added = entries.slice(before.entries);
+  assert.equal(added.length, 2);
+  assert.deepEqual(added.map((e) => e.person_id).sort(), [JON, WIFE]);
+  assert.ok(added.every((e) => e.amount === 2 && /large/.test(e.unit) && e.food_id && !e.is_estimate));
+  assert.equal(foods.length, before.foods + 1, 'the food is saved once for both people');
+  console.log('ok  AI logging: question, answer, both people, adjust, remove, save');
+
+  // ---- An unknown barcode, then a label photo: saved under that barcode, found on the next scan.
+  aiScript = [() => [{ type: 'text', text: JSON.stringify({ readable: true, problem: '', name: '', brand: '', serving_label: '2/3 cup (55g)', serving_grams: 55, calories: 230, protein: 10, carbs: 30, fat: 8, fiber: 4 }) }]];
+  await page.click('#open-add');
+  await page.click('#open-scanner');
+  await page.fill('#scan-code', '000000000017');
+  await page.click('#scan-form button[type=submit]');
+  await page.waitForFunction(() => document.querySelector('#results-note').textContent.includes('Snap a label'), null, { timeout: 30000 });
+  await page.setInputFiles('#label-photo', path.join(FIXTURES, 'chobani.png'));
+  await page.waitForSelector('#food[open]', { timeout: 30000 });
+  assert.equal(await page.textContent('#food-name'), 'Protein Granola');
+  assert.match(await page.textContent('#food-badges'), /From label photo/);
+  assert.match(await page.textContent('#food-macros'), /^\s*230\s/);
+  await page.click('#food-form button[type=submit]');
+  await closed('food');
+  const granola = foods.find((f) => f.source === 'label');
+  assert.equal(granola.barcode, '000000000017');
+  await page.click('#open-add');
+  await page.click('#open-scanner');
+  await page.fill('#scan-code', '000000000017');
+  await page.click('#scan-form button[type=submit]');
+  await page.waitForSelector('#food[open]');
+  assert.match(await page.textContent('#food-badges'), /Saved/);
+  await page.click('#food-back');
+  await page.click('#add [data-close]');
+  console.log('ok  label photo for an unknown barcode; the next scan finds it saved');
 
   // ---- Settings: rename and change a target.
   await page.click('#open-settings');
@@ -343,8 +442,8 @@ function localDay(d) {
   await page.waitForSelector('#login:not([hidden])');
   console.log('ok  sign out');
 
-  // Expected: the wrong-password 400, the deliberate 500.
-  const unexpected = errors.filter((e) => !e.includes('db down') && !e.includes('status of 400') && !e.includes('status of 500'));
+  // Expected: the wrong-password 400, the deliberate 500, the switched-off camera.
+  const unexpected = errors.filter((e) => !e.includes('db down') && !e.includes('status of 400') && !e.includes('status of 500') && !e.includes('NotAllowedError'));
   if (unexpected.length) console.log('console errors:', unexpected);
   assert.deepEqual(unexpected, [], 'console errors');
   await browser.close();

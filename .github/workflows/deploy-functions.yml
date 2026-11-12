@@ -1,6 +1,6 @@
 name: Deploy Supabase functions
-# Installs the server code in supabase/functions on the Supabase project, with the USDA key.
-# Needs repository secrets SUPABASE_ACCESS_TOKEN and USDA_API_KEY (see SETUP.md).
+# Installs the server code in supabase/functions (food, assist) on the Supabase project, with its keys.
+# Needs repository secrets SUPABASE_ACCESS_TOKEN, USDA_API_KEY and ANTHROPIC_API_KEY (see SETUP.md).
 on:
   push:
     branches: [main]
@@ -12,6 +12,7 @@ concurrency:
 env:
   SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
   USDA_API_KEY: ${{ secrets.USDA_API_KEY }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   PROJECT_REF: xqfvgrswhlrpxelblahs
 jobs:
   deploy:
@@ -24,7 +25,11 @@ jobs:
         run: |
           [ -n "$SUPABASE_ACCESS_TOKEN" ] || { echo "::error::Add the SUPABASE_ACCESS_TOKEN repository secret"; exit 1; }
           [ -n "$USDA_API_KEY" ] || { echo "::error::Add the USDA_API_KEY repository secret"; exit 1; }
+          [ -n "$ANTHROPIC_API_KEY" ] || echo "::warning::ANTHROPIC_API_KEY is not set: AI logging and label photos won't work until it is"
       # --yes: the CLI asks for confirmation, and a workflow run cannot answer.
       - run: supabase secrets set --yes --project-ref "$PROJECT_REF" USDA_API_KEY="$USDA_API_KEY"
-      # Sign-in is checked inside the function, so the platform's own JWT check is turned off.
+      - if: env.ANTHROPIC_API_KEY != ''
+        run: supabase secrets set --yes --project-ref "$PROJECT_REF" ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+      # Sign-in is checked inside the functions, so the platform's own JWT check is turned off.
       - run: supabase functions deploy food --yes --project-ref "$PROJECT_REF" --no-verify-jwt
+      - run: supabase functions deploy assist --yes --project-ref "$PROJECT_REF" --no-verify-jwt
