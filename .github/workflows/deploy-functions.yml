@@ -24,6 +24,7 @@ jobs:
         run: |
           [ -n "$SUPABASE_ACCESS_TOKEN" ] || { echo "::error::Add the SUPABASE_ACCESS_TOKEN repository secret"; exit 1; }
           [ -n "$USDA_API_KEY" ] || { echo "::error::Add the USDA_API_KEY repository secret"; exit 1; }
-      - run: supabase secrets set --project-ref "$PROJECT_REF" USDA_API_KEY="$USDA_API_KEY"
+      # --yes: the CLI asks for confirmation, and a workflow run cannot answer.
+      - run: supabase secrets set --yes --project-ref "$PROJECT_REF" USDA_API_KEY="$USDA_API_KEY"
       # Sign-in is checked inside the function, so the platform's own JWT check is turned off.
-      - run: supabase functions deploy food --project-ref "$PROJECT_REF" --no-verify-jwt
+      - run: supabase functions deploy food --yes --project-ref "$PROJECT_REF" --no-verify-jwt
