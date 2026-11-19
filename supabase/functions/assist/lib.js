@@ -245,6 +245,7 @@ const RECIPE_SYSTEM = `You turn a recipe into ingredients with amounts for a foo
 - Leave out water, and salt, pepper, herbs and spices under a tablespoon.
 - Servings: as the recipe states; if it doesn't, estimate a sensible number.
 - If an ingredient can't be found after two searches, list it in skipped.
+- The recipe may come as screenshots or photos (a web page, an app, a recipe card). Read the ingredient list and servings from them; ignore ads, comments and the method steps.
 - Finish by calling save_recipe once. Don't ask questions or write other text.`;
 
 const RECIPE_TOOLS = [
@@ -279,13 +280,21 @@ const RECIPE_TOOLS = [
   },
 ];
 
-// Reads a pasted recipe. Returns { name, servings, ingredients: [{ food, amount, unit, grams }], skipped }.
-export async function parseRecipe({ text }, deps) {
-  const messages = [{ role: 'user', content: `The recipe:\n\n${text}` }];
+// Reads a recipe from pasted text and/or screenshots ({ data: base64, mediaType }).
+// Returns { name, servings, ingredients: [{ food, amount, unit, grams }], skipped }.
+export async function parseRecipe({ text = '', images = [] }, deps) {
+  const content = images.length
+    ? [
+      ...images.map((img) => ({ type: 'image', source: { type: 'base64', media_type: img.mediaType || 'image/jpeg', data: img.data } })),
+      { type: 'text', text: `The recipe is in ${images.length > 1 ? 'these images' : 'this image'}.${text ? `\n\nAlso: ${text}` : ''}` },
+    ]
+    : `The recipe:\n\n${text}`;
+  const messages = [{ role: 'user', content }];
   const { call } = await runTools({
     system: RECIPE_SYSTEM, tools: RECIPE_TOOLS, messages, deps, stopTools: ['save_recipe'], finish: 'save_recipe', allowQuestions: false,
   });
   const { name, servings, ingredients, skipped } = call.input;
+  if (!ingredients.length) throw new Error(images.length ? 'Couldn\'t find an ingredient list in that image. Try a clearer screenshot of the ingredients.' : 'Couldn\'t find any ingredients in that text.');
   const resolved = await Promise.all(ingredients.map(async (it) => {
     const food = await resolveFood(it.ref, deps);
     return { food, ...amountFor(food, it.amount, it.unit) };

@@ -171,9 +171,12 @@
     </div>
     <p id="recipe-from-hint" class="hint" hidden>The amounts below are what was logged, so they make 1 serving. Change the servings if they were for the whole batch.</p>
     <details id="recipe-paste">
-      <summary>Paste a recipe and let the AI fill this in</summary>
+      <summary>Paste a recipe or use a screenshot, and let the AI fill this in</summary>
       <div class="stack">
-        <textarea id="recipe-text" rows="6" placeholder="Paste the ingredient list (and servings, if the recipe says)"></textarea>
+        <label class="filebutton">Use screenshots or photos
+          <input id="recipe-photo" type="file" accept="image/*" multiple>
+        </label>
+        <textarea id="recipe-text" rows="6" placeholder="Or paste the ingredient list (and servings, if the recipe says)"></textarea>
         <div class="actions">
           <span id="recipe-status" class="hint"></span>
           <span class="spacer"></span>

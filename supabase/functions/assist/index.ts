@@ -34,8 +34,9 @@ Deno.serve(async (req) => {
     if (body.action === 'chat' && body.text && body.context) {
       return json(200, await converse({ messages: body.messages, text: String(body.text).slice(0, 1000), context: body.context }, deps));
     }
-    if (body.action === 'recipe' && body.text) {
-      return json(200, await parseRecipe({ text: String(body.text).slice(0, 8000) }, deps));
+    if (body.action === 'recipe' && (body.text || body.images?.length)) {
+      const images = (body.images || []).slice(0, 4).map((i: { data: string; mediaType?: string }) => ({ data: String(i.data), mediaType: i.mediaType }));
+      return json(200, await parseRecipe({ text: String(body.text || '').slice(0, 8000), images }, deps));
     }
     if (body.action === 'label' && body.image) {
       return json(200, { result: await readLabel({ image: body.image, mediaType: body.mediaType, barcode: body.barcode }, deps) });
