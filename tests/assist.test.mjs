@@ -169,6 +169,27 @@ try {
   assert.ok(recipe.ingredients[1].grams > 0 && recipe.ingredients[1].unit !== 'a big one');
   console.log(`ok  pasted recipe -> ${recipe.ingredients.map((i) => `${i.amount} ${i.unit} ${i.food.name}`).join('; ')}`);
 
+  // ---- 3c. Recipe from screenshots ----
+  script = [
+    (r) => {
+      const c = r.messages[0].content;
+      assert.deepEqual(c.map((b) => b.type), ['image', 'image', 'text']);
+      assert.equal(c[0].source.data, 'aW1nMQ==');
+      assert.match(c[2].text, /these images/);
+      return [thinking, use('p1', 'search_foods', { query: 'eggs' })];
+    },
+    (r) => {
+      const egg = resultsFor(r).p1[0];
+      return [thinking, use('p2', 'save_recipe', { name: 'Egg bake', servings: 5, skipped: [], ingredients: [{ ref: egg.ref, amount: 300, unit: 'g' }] })];
+    },
+  ];
+  const shot = await parseRecipe({ images: [{ data: 'aW1nMQ==', mediaType: 'image/jpeg' }, { data: 'aW1nMg==' }] }, deps);
+  assert.equal(shot.servings, 5);
+  assert.equal(shot.ingredients[0].grams, 300);
+  script = [() => [thinking, use('p3', 'save_recipe', { name: '', servings: 1, skipped: [], ingredients: [] })]];
+  await assert.rejects(parseRecipe({ images: [{ data: 'eA==' }] }, deps), /ingredient list in that image/);
+  console.log('ok  recipe from screenshots; an image with no recipe explains why');
+
   // ---- 4. Label photo ----
   script = [(r) => {
     assert.equal(r.output_config.format.type, 'json_schema');

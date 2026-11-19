@@ -448,6 +448,22 @@ function localDay(d) {
   await page.waitForFunction(() => document.querySelectorAll('#recipe-items .citem').length === 2, null, { timeout: 30000 });
   assert.match(await page.textContent('#toast'), /cinnamon/);
   assert.equal(await page.inputValue('#recipe-form [name=name]'), 'Banana oat bowl', 'AI keeps a name already typed');
+  // A screenshot works too (the scripted AI "reads" it as a recipe with one ingredient).
+  aiScript = [
+    (r) => {
+      assert.equal(r.messages[0].content[0].type, 'image');
+      assert.equal(r.messages[0].content[0].source.media_type, 'image/jpeg');
+      return [use('s1', 'search_foods', { query: 'honey' })];
+    },
+    (r) => {
+      const honey = JSON.parse(r.messages.at(-1).content[0].content)[0];
+      return [use('s2', 'save_recipe', { name: 'Shot', servings: 2, skipped: [], ingredients: [{ ref: honey.ref, amount: 10, unit: 'g' }] })];
+    },
+  ];
+  await page.setInputFiles('#recipe-photo', path.join(FIXTURES, 'chobani.png'));
+  await page.waitForFunction(() => document.querySelectorAll('#recipe-items .citem').length === 3, null, { timeout: 30000 });
+  assert.match(await page.textContent('#recipe-items'), /Honey/i);
+  await page.click('[data-rremove="2"]');
   // 2 bananas -> 1: the totals follow.
   const wholeBefore = await page.textContent('#recipe-totals');
   await page.fill('#recipe-items [data-ramount="0"]', '1');

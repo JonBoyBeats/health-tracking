@@ -698,13 +698,16 @@ async function saveRecipe() {
   toast(`Recipe saved · ${after.people.map(leftText).join(' · ')}`);
 }
 
-async function fillRecipeWithAi() {
+// From the pasted text, or from screenshots/photos (up to 4, for a recipe that runs over several).
+async function fillRecipeWithAi(files = []) {
   const text = $('recipe-text').value.trim();
-  if (!text) return;
+  if (!text && !files.length) return;
   $('recipe-ai').disabled = true;
-  $('recipe-status').textContent = 'Reading the recipe…';
+  $('recipe-status').textContent = files.length ? 'Reading the screenshot…' : 'Reading the recipe…';
   try {
-    const res = await db.assist({ action: 'recipe', text });
+    // Tall phone screenshots keep more detail at 2000 px on the long side.
+    const images = await Promise.all([...files].slice(0, 4).map(async (f) => ({ data: await photoToJpeg(f, 2000), mediaType: 'image/jpeg' })));
+    const res = await db.assist({ action: 'recipe', text, images });
     const f = $('recipe-form');
     if (!f.name.value.trim()) f.name.value = res.name;
     f.servings.value = res.servings;
@@ -1202,7 +1205,11 @@ $('recipe-items').addEventListener('click', (ev) => {
   renderRecipe();
 });
 $('recipe-form').servings.addEventListener('input', updateRecipeTotals);
-$('recipe-ai').addEventListener('click', fillRecipeWithAi);
+$('recipe-ai').addEventListener('click', () => fillRecipeWithAi());
+$('recipe-photo').addEventListener('change', (ev) => {
+  if (ev.target.files.length) fillRecipeWithAi(ev.target.files);
+  ev.target.value = '';
+});
 $('recipe-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveRecipe().catch(fail); });
 $('recipe-cancel').addEventListener('click', () => {
   const backToConfirm = state.recipe?.logAfter?.mode === 'confirm';
